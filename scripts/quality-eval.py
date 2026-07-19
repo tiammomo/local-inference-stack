@@ -63,6 +63,7 @@ def request_message(base_url: str, token: str, case: dict[str, Any]) -> tuple[di
             "Content-Type": "application/json",
             "x-api-key": token,
             "anthropic-version": "2023-06-01",
+            "x-modelport-traffic-class": "synthetic",
         },
         method="POST",
     )

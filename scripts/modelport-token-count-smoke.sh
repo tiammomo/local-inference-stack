@@ -47,6 +47,7 @@ curl --noproxy '*' -fsS "$QWEN_ENDPOINT/v1/messages/count_tokens" \
 
 curl --noproxy '*' -fsS "$MODELPORT_ENDPOINT/v1/messages/count_tokens" \
   -H "x-api-key: $MODELPORT_AUTH_TOKEN" \
+  -H 'x-modelport-traffic-class: synthetic' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   --data-binary "@$TEMP_DIR/modelport-request.json" > "$TEMP_DIR/modelport-response.json"

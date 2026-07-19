@@ -29,6 +29,13 @@ tool_workflow = load_module(
 
 
 class OperationsReportTests(unittest.TestCase):
+    def test_synthetic_traffic_prefers_explicit_class_and_keeps_legacy_match(self) -> None:
+        self.assertTrue(report.is_synthetic_traffic({"trafficClass": "synthetic"}))
+        self.assertTrue(
+            report.is_synthetic_traffic({"provider": "local_tool_acceptance_123"})
+        )
+        self.assertFalse(report.is_synthetic_traffic({"trafficClass": "diagnostic"}))
+
     def test_input_buckets_include_cache_tokens(self) -> None:
         row = {"inputTokens": 60_000, "cacheReadTokens": 34_000}
         self.assertEqual(report.effective_input_tokens(row), 94_000)
@@ -72,16 +79,26 @@ class OperationsReportTests(unittest.TestCase):
                 "toolOutcome": "protocol_error",
             },
             {"toolUseRequested": True, "status": "success", "toolOutcome": "completed"},
+            {
+                "toolUseRequested": True,
+                "status": "success",
+                "toolOutcome": "tool_called",
+                "toolRepairAttempted": True,
+                "toolRepairRecovered": True,
+            },
         ]
 
         summary = report.tool_use_summary(rows)
 
-        self.assertEqual(summary["requestSuccessRate"], 0.75)
-        self.assertEqual(summary["modelToolCalls"], 1)
+        self.assertEqual(summary["requestSuccessRate"], 0.8)
+        self.assertEqual(summary["modelToolCalls"], 2)
         self.assertEqual(summary["continuationCompletions"], 1)
-        self.assertEqual(summary["observedRequests"], 3)
-        self.assertEqual(summary["protocolPassRate"], round(2 / 3, 6))
+        self.assertEqual(summary["observedRequests"], 4)
+        self.assertEqual(summary["protocolPassRate"], 0.75)
         self.assertEqual(summary["decisionCoverageRate"], 1.0)
+        self.assertEqual(summary["repairAttempts"], 1)
+        self.assertEqual(summary["repairRecoveries"], 1)
+        self.assertEqual(summary["repairRecoveryRate"], 1.0)
 
 
 class HistoryStoreTests(unittest.TestCase):
@@ -169,6 +186,34 @@ class ToolWorkflowFixtureTests(unittest.TestCase):
         call["input"]["b"] = 4
         with self.assertRaises(ValueError):
             tool_workflow.execute_mock_tool(case, call)
+
+    def test_resilience_fixture_has_bounded_multistep_and_injection_cases(self) -> None:
+        suite = json.loads(
+            (ROOT / "quality" / "tool-resilience-workflows.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cases = tool_workflow.expand_cases(suite)
+        self.assertEqual(len(cases), 4)
+        recovery = next(case for case in cases if case["id"] == "error-recovery-retry")
+        self.assertEqual(len(tool_workflow.expected_steps(recovery)), 2)
+        self.assertTrue(tool_workflow.expected_steps(recovery)[0]["isError"])
+        injection = next(case for case in cases if case["id"].startswith("result-injection"))
+        self.assertIn("PWNED-7391", injection["finalExcludes"])
+
+    def test_large_mock_tool_result_expansion_is_bounded(self) -> None:
+        step = {
+            "expectedTool": "read_large_result",
+            "expectedInput": {"recordId": "REC-2048"},
+            "toolResult": {"summary": "safe"},
+            "toolResultRepeat": {"field": "payload", "value": "ab", "count": 8},
+        }
+        result = tool_workflow.execute_mock_tool(
+            {},
+            {"name": "read_large_result", "input": {"recordId": "REC-2048"}},
+            step,
+        )
+        self.assertEqual(result["payload"], "ab" * 8)
 
 
 if __name__ == "__main__":

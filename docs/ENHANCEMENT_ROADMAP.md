@@ -1,6 +1,6 @@
 # 推理与 Tool Use 增强路线图
 
-状态：P0 第一批已实现并进入验收；有边界修复、多步/错误恢复与 traffic class 待实现。
+状态：P0 第二批已实现并进入验收；剩余重点转向连续稳定性、推理验证器升级与上下文治理。
 
 审查基线：2026-07-19，Qwen3.5-9B Q5_K_M、128K 单 Slot、Q8_0 K/V、llama.cpp、
 ModelPort Anthropic Messages 入口。
@@ -19,8 +19,10 @@ ModelPort Anthropic Messages 入口。
 - 运行台把请求可用性、协议通过、合法 Tool Call 与续轮完成分开，并使用独立 TTFT/E2E
   比例尺展示分位。
 
-尚未完成：协议自动修复、多步与 `is_error` 恢复、Prompt Injection/超长结果、显式
-traffic class、Reasoning/正文 Token 拆分和验证器驱动的档位升级。
+第二批新增：非流式严格 Schema 失败后的单次同 Provider 修复、双尝试 Token/账本合并、
+显式 traffic class、两步依赖工作流、`is_error` 恢复、Tool Result Prompt Injection 与
+约 32KB 大结果门禁。尚未完成：Reasoning/正文 Token 拆分、验证器驱动的档位升级、
+并行工作流和客户端放弃/过期状态。
 
 ## 目标
 
@@ -98,10 +100,13 @@ grammar 约束；`response_format` 的 JSON Schema 能力也不等同于 Tool Ca
 ### P0.2 一次有边界的协议修复
 
 - 仅在模型输出尚未交给客户端、工具不可能已经执行时允许一次修复。
-- 修复提示只包含确定性的 Schema 错误路径，不附加业务 Prompt。
-- 非流式响应可以直接缓冲；流式 Tool Block 必须先完成聚合和校验，再决定交付或修复。
+- 修复提示为固定文本，不包含 Schema 路径、原参数、业务 Prompt 或 Provider Body，
+  避免路径/参数把不可信内容重新注入模型。
+- 仅非流式 Anthropic Messages → OpenAI-compatible 路径启用；流式失败继续 fail-closed，
+  不在已可能交付分片后重放。
 - 不对超时、取消、权限错误或工具执行失败做隐式模型重试。
-- 记录 `repair_attempted`、`repair_reason` 和 `repair_recovered` 聚合指标。
+- 记录 `toolRepairAttempted` 和 `toolRepairRecovered` 聚合指标；原因固定为 strict Schema，
+  不持久化高基数字段。
 
 ### P0.3 Tool 工作流状态模型
 

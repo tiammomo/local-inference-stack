@@ -37,9 +37,19 @@
       "supported": true,
       "streamingArguments": "best_effort",
       "responseValidation": "strict",
+      "repairInvalidArguments": {
+        "enabled": true,
+        "maximumAttempts": 1,
+        "nonStreamOnly": true
+      },
       "parallelToolCalls": true
     },
-    "streaming": true
+    "streaming": true,
+    "trafficClass": {
+      "header": "x-modelport-traffic-class",
+      "values": ["business", "synthetic", "diagnostic"],
+      "default": "business"
+    }
   },
   "limits": {
     "contextTokens": 131072,

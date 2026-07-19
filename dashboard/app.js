@@ -552,6 +552,7 @@ function renderToolUse() {
   setText('tool-requests', number(tool.observedRequests))
   setText('tool-successes', number(tool.schemaValidatedCalls))
   setText('tool-failures', number(tool.protocolErrors))
+  setText('tool-repair', `${number(tool.repairRecoveries)} / ${number(tool.repairAttempts)}`)
   const outcomes = Object.entries(tool.byOutcome || {})
     .sort((left, right) => Number(right[1]) - Number(left[1]))
   $('tool-outcomes').innerHTML = outcomes.length

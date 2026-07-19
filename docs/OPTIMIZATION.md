@@ -187,6 +187,12 @@ ModelPort 内聚合为完整对象后提交，未声明/缺失工具名、非法
 `is_error=true` 显式标记进 OpenAI tool-role 内容。该实现位于通用协议 adapter，
 Dashboard 也可按 Provider 配置，不绑定 Qwen。
 
+当前进一步启用 `repair_invalid_arguments=true`。它只在非流式 strict JSON Schema
+失败、且响应尚未交付时追加一次同 Provider 尝试；固定修复提示不含参数、路径或业务
+正文，两个尝试分别写入账本并合并 Token。流式、超时、认证与工具执行错误不修复。
+真实上游固定门禁由 40 个基础闭环加 4 个多步/错误恢复/注入/大结果场景组成；所有
+验收请求标记为 synthetic，不进入默认业务 SLO。
+
 ### P2 已实现：并发吞吐 profile
 
 现已提供 `latency` 和 `throughput` 两个显式可切换 profile。相同两路并发、每路

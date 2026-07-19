@@ -18,6 +18,7 @@ fi
 status="$(curl --noproxy '*' -sS -o "$BODY_FILE" -w '%{http_code}' \
   -X POST "$BASE_URL/v1/messages" \
   -H "x-api-key: $MODELPORT_AUTH_TOKEN" \
+  -H 'x-modelport-traffic-class: synthetic' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   --data-binary '{

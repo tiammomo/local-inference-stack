@@ -80,6 +80,7 @@ def complete(prompt: str) -> tuple[str, dict]:
             {
                 "x-api-key": auth_token,
                 "anthropic-version": "2023-06-01",
+                "x-modelport-traffic-class": "synthetic",
             },
         )
         answer = "".join(

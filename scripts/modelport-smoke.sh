@@ -21,6 +21,7 @@ printf '\n'
 
 curl --noproxy '*' -fsS "$MODELPORT_ENDPOINT/v1/messages" \
   -H "x-api-key: $MODELPORT_AUTH_TOKEN" \
+  -H 'x-modelport-traffic-class: synthetic' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{

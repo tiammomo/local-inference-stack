@@ -39,6 +39,7 @@ def complete(model: str, thinking: dict, max_tokens: int) -> tuple[str, dict]:
             "Content-Type": "application/json",
             "x-api-key": AUTH_TOKEN,
             "anthropic-version": "2023-06-01",
+            "x-modelport-traffic-class": "synthetic",
         },
         method="POST",
     )

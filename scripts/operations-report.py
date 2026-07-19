@@ -210,6 +210,13 @@ def numeric(row: dict[str, Any], field: str) -> int:
     return int(value) if isinstance(value, (int, float)) else 0
 
 
+def is_synthetic_traffic(row: dict[str, Any]) -> bool:
+    """Prefer the bounded gateway label and retain legacy mock compatibility."""
+    return row.get("trafficClass") == "synthetic" or str(
+        row.get("provider") or ""
+    ).startswith("local_tool_acceptance_")
+
+
 def effective_input_tokens(row: dict[str, Any]) -> int:
     return sum(
         numeric(row, field)
@@ -314,6 +321,8 @@ def tool_use_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     protocol_errors = outcomes["protocol_error"]
     protocol_passes = observable_successes
     protocol_evaluations = protocol_passes + protocol_errors
+    repair_attempts = sum(row.get("toolRepairAttempted") is True for row in tool_rows)
+    repair_recoveries = sum(row.get("toolRepairRecovered") is True for row in tool_rows)
     return {
         "requests": len(tool_rows),
         "requestSuccesses": request_successes,
@@ -336,6 +345,9 @@ def tool_use_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "protocolErrors": protocol_errors,
         "protocolEvaluations": protocol_evaluations,
         "protocolPassRate": rate(protocol_passes, protocol_evaluations),
+        "repairAttempts": repair_attempts,
+        "repairRecoveries": repair_recoveries,
+        "repairRecoveryRate": rate(repair_recoveries, repair_attempts),
         "byOutcome": dict(sorted(outcomes.items())),
         "coverageNote": (
             "request success is transport/protocol availability; continuationFinalRate "
@@ -564,7 +576,7 @@ def build_report(
     synthetic_rows = [
         row
         for row in loaded_rows
-        if str(row.get("provider") or "").startswith("local_tool_acceptance_")
+        if is_synthetic_traffic(row)
     ]
     candidate_rows = (
         loaded_rows

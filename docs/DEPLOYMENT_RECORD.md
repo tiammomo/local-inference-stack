@@ -21,8 +21,8 @@
 | --- | --- |
 | llama.cpp OCI digest | `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8` |
 | llama.cpp build | `10015`，commit `12127defd` |
-| ModelPort 源码 | 本地 commit `2aaa977`（本轮未推送 ModelPort 远端） |
-| ModelPort 本地镜像 ID | `sha256:806d286c489547dce7cce6cff038dfa1b346084a90fff62177fc718a5b45a39c` |
+| ModelPort 源码 | 本地 commit `c115364`（本轮未推送 ModelPort 远端） |
+| ModelPort 本地镜像 ID | `sha256:e122556bdb4e460db417ec187b252a210c226da700c8ba3568725028e9513d5b` |
 | Dashboard 本地镜像 ID | `sha256:99cb2838e274b4042a3b7fbe4842ad0370b8a83ec5a767eb70df44c343f1b850` |
 | Q5_K_M SHA256 | `dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c` |
 | MTP Q5_K_M SHA256 | `1732d6616554b102be9bc41684cd094f471e1b3067f5e5a89eb5a86a5a4f2a6c`，仅保留用于 A/B |
@@ -44,8 +44,11 @@
 | ModelPort 生成 | 通过 | Anthropic Messages 经 `local_qwen` 返回预期中文 |
 | ModelPort 流式 | 通过 | provider matrix 的非流式与流式均 PASS |
 | ModelPort Tool Use | 通过 | 严格模式下非流式、完整参数流式与 continuation 均 PASS；Mock 拒绝未声明工具、非对象参数及完整 JSON Schema 违规 |
-| 闭环 Tool Use | 通过 | 5 Case standard 冒烟 5/5；40 Case 全量 40/40，覆盖选择、Schema、Mock 执行、`tool_result` 续轮和 auto 不调用 |
-| 长期运营报告 | 通过 | 24 小时加载 132 条、排除 8 条 mock；分析 124 条，成功率 96.77%，P95 39.194 s；新部署后 3 条 Tool Use 全部成功 |
+| 闭环 Tool Use | 通过 | 5 Case standard 冒烟 5/5；当前多步 Harness 全量 40/40（`logs/quality/20260719T063452Z-tool-workflow-full.json`），覆盖选择、Schema、Mock 执行、`tool_result` 续轮和 auto 不调用 |
+| Tool 参数受控修复 | 通过 | Rust 顺序 Mock 首次 strict Schema 失败、第二次恢复；`retryCount=1`，22/5 Token 合并，attempted/recovered 为真且不误记 fallback；真实 Qwen 合法调用无需触发修复 |
+| Tool 韧性集 | 通过 | 4/4：两工具依赖链、`is_error=true` 换仓恢复、Tool Result 指令注入防护、约 32KB 大结果摘要；分别为 3/3/2/2 轮 |
+| 合成流量隔离 | 通过 | 1 小时加载 339 条、按 `trafficClass=synthetic` 与旧 Mock 兼容规则排除 107 条；228 条业务窗口成功率 100%，可用 `--include-synthetic` 审计 |
+| 长期运营报告 | 通过 | 业务、synthetic、diagnostic 使用有界枚举；默认业务 SLO 排除 synthetic，并显示 Tool 修复恢复/尝试数 |
 | 每日报告 Timer | 通过 | user systemd 已启用；迁移后执行 `status=0/SUCCESS`；每日 02:15 后随机 0--10 分钟，当前 `active (waiting)` |
 | 本地模型运行台 | 通过 | `127.0.0.1:33004`；systemd active/enabled；2048px 满宽和 390px 移动端无溢出、无浏览器错误 |
 | WebSocket 实时链路 | 通过 | 前端无 HTTP API 轮询；实测 2.0--2.2 秒 live、5 秒 status；6H 订阅、强制刷新和服务重启自动重连通过 |
@@ -56,7 +59,7 @@
 | 运行台只读边界 | 通过 | 仅回环监听；POST 405；非法窗口 400；越界/缺失资源 404；WebSocket 非同源 Origin 403；安全响应头生效 |
 | ModelPort 精确 Token 计数 | 通过 | 中文 system、混合消息和 Tool Schema：直连与逻辑别名均为 282；关闭思考模板均为 15 |
 | ModelPort 上下文准入 | 通过 | `15 + 131072 > 131072` 在占用 Slot 前返回 400；错误含精确数值和“不静默截断”保证；思考输入建议上限 94,208 |
-| 部署漂移检查 | 通过 | 38/38；模型、镜像、构建、上下文、端口、挂载、基础/闭环质量 SHA256、最小权限和跨项目契约一致 |
+| 部署漂移检查 | 通过 | 39/39；模型、镜像、构建、上下文、端口、挂载、基础/闭环/韧性质量 SHA256、最小权限和跨项目契约一致 |
 | 合成质量门禁 | 通过 | 10 个 Case × 3 次，共 30/30；覆盖推理、指令、抽取、JSON、代码、多语言和 Tool Use |
 | Tool Use 结果观测 | 通过 | 请求级区分 `tool_called/final_answer/answered_without_tool/completed_unobserved` 与错误终态；不保留工具内容 |
 | 聚合时序历史 | 通过 | SQLite `0600`；24h 原始、30d 分钟和 365d 小时保留；WebSocket 查询按窗口自动选分辨率 |
@@ -64,7 +67,7 @@
 | Runtime 最小权限 | 通过 | UID/GID `1000:1000`、只读根文件系统、drop ALL、no-new-privileges、仅回环端口 |
 | KV 快照实验 | 通过 | Slot 0 合成前缀保存/恢复成功；140 tokens、55,132,240 bytes、文件权限 `0600` |
 | 串行候选/恢复演练 | 通过 | `18081` 候选经直连、ModelPort、Reasoning、Token、准入、Tool Use 和质量 4/4；候选清理后生产自动恢复 |
-| ModelPort 基线仓库检查 | 通过 | 304 个 Rust lib 测试通过；格式、编译、Mock Schema 拒绝和真实上游验收通过 |
+| ModelPort 基线仓库检查 | 通过 | 307 个 Rust lib 测试与 6 个配置测试通过；Clippy `-D warnings`、Mock 修复、Schema 拒绝和真实上游验收通过 |
 | 118K 上下文 | 通过 | 冷缓存 118,062 prompt tokens，准确召回中部验收码 |
 | 长上下文延迟 | 42.61 s | 最终配置的请求端到端；服务端约 2,807 tok/s |
 | ModelPort 92K 思考冷链路 | 通过 | 92,063 input / 554 output tokens，39.26 s，正文精确匹配 |
@@ -81,6 +84,7 @@
 | 短请求生成速度 | 约 88--90 tok/s | 多样主题 512-token 解码；重复结构最高 126.59 tok/s |
 | 重启后冷/热短解码 | 81.36 / 120.18 tok/s | 候选恢复生产后的连续两次 512-token 实测，验证 n-gram 热身收益 |
 | Provider 身份与计费复验 | 通过 | Quant Key 调用 `local_qwen`；17 input / 4 output tokens；`upstream-returned`；内部费用 `$0.00000685` |
+| 2026-07-19 Tool Reliability standard | 通过 | `logs/acceptance/20260719T063149Z-standard.json`；基础闭环 5/5、韧性 4/4、质量 4/4，最终 ModelPort 镜像健康 |
 
 ## 服务现状
 

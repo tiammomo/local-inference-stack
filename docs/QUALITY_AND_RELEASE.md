@@ -38,14 +38,18 @@ scripts/tool-workflow-eval.py --smoke
 # 全部 40 Case；模型升级或协议变更时执行
 scripts/tool-workflow-eval.py
 
+# 4 个韧性场景：两步依赖、is_error 恢复、结果注入、约 32KB 结果
+scripts/tool-workflow-eval.py --cases quality/tool-resilience-workflows.json
+
 # 单项重复定位
 scripts/tool-workflow-eval.py --case calculator-add --trials 3
 ```
 
 每个 Tool Case 都严格匹配工具名和完整参数，执行确定性 Mock Tool，把结果作为
 `tool_result` 返回，并要求下一轮给出包含预期事实的最终正文且不得再次误调用。证据仅
-保存 Case ID、阶段、轮数、延迟、Token 和通过结果。Mock Executor 只用于验收，不进入
-ModelPort 网关或生产应用。后续多步、错误恢复、注入与超长结果范围见
+保存 Case ID、阶段、轮数、工具步数、延迟、Token 和通过结果。Mock Executor 只用于
+验收，不进入 ModelPort 网关或生产应用。韧性集已经覆盖多步、错误恢复、注入与有界
+大结果；剩余并行、客户端放弃和连续稳定性范围见
 [`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
 
 ## 独立候选端口

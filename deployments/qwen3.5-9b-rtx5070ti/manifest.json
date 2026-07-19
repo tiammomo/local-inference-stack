@@ -51,17 +51,20 @@
     "composeSha256": "822550608320dd252e6d53d4ebab5192917ed59b5f542cbebb9deb9670ac7412",
     "latencyProfileSha256": "d062afdafe4106735a7b9d3cb32122532688a74d9ac0eba8009413a90dbeb200",
     "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
-    "providerContractSha256": "f754986881af4d035f6497d56bf1b700616da0157d657d27e3417117c40e4171",
+    "providerContractSha256": "a63730ea755e38276e9b62ee104f876b68759f7e3fdf813d6964a8bcd30360e3",
     "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
-    "acceptanceSuiteSha256": "4dfdbf4dcafb7f4c4aeff5b4ad8901f19ae1a5af589bbec263eeab57dce6ef6f",
+    "acceptanceSuiteSha256": "d40623463efc4fa5588531f0380c19cacf9c4da4921a3f4a52a67ab11d5f8473",
     "toolWorkflowSuiteSha256": "c6008e01efbd313c8d338c9f3c7e02cbaa6a5facac059efbdfe19d0492ad538a",
-    "toolWorkflowHarnessSha256": "c00b4349c0b7abd7bde4fc3dab9d6f72ae57226c30707629030bd0f6a7500415",
-    "dashboardBaselineSha256": "6ada3738c245f2502e01dfd5c7b098afd3808503feeb3b3f7ce15faa50b87690"
+    "toolWorkflowHarnessSha256": "df02c22f8fa8e6e9bef7aa2c03b7d302177d0c8b4250d4cdfb847f7b753818d0",
+    "toolResilienceSuiteSha256": "119ca7dbeacbc82b35c409154293f5d4baf6af01664701969bfe9d9300fcc219",
+    "dashboardBaselineSha256": "b933aa341058cba31a5b40fe4a7ed4a203436d6023b7fbe4de985a55053fe5f1"
   },
   "quality": {
     "suite": "quality/cases.json",
     "toolWorkflowSuite": "quality/tool-workflows.json",
     "toolWorkflowCases": 40,
+    "toolResilienceSuite": "quality/tool-resilience-workflows.json",
+    "toolResilienceCases": 4,
     "releaseTrials": 3,
     "evidenceDirectory": "logs/quality"
   },

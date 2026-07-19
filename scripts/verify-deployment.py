@@ -154,6 +154,11 @@ def main() -> int:
         configuration["toolWorkflowHarnessSha256"],
     )
     check(
+        "Tool resilience suite SHA256",
+        sha256(ROOT_DIR / "quality" / "tool-resilience-workflows.json"),
+        configuration["toolResilienceSuiteSha256"],
+    )
+    check(
         "dashboard baseline SHA256",
         sha256(ROOT_DIR / "dashboard" / "runtime-baseline.json"),
         configuration["dashboardBaselineSha256"],

@@ -167,14 +167,13 @@ client IP addresses are excluded.
 当前运行时参数已经形成稳定基线。下一阶段优先提升可验证的任务完成率，而不是无证据
 地继续增加启动参数：
 
-1. 在已完成完整 JSON Schema 校验和请求级 Tool 决策观测的基础上，增加一次有边界
-   的协议修复；实际工具执行、授权与沙箱仍由应用负责。
-2. 将当前 40 Case 两轮闭环集继续扩展到多步调用、错误恢复、流式分片和 Prompt
-   Injection，并建立连续多次运行的稳定门槛。
-3. 为验收调用增加独立 traffic class，把业务 SLO 与合成流量彻底分开。
-4. 使用验证器驱动的 `fast -> code -> deep` 自适应升级，并以编译器、测试和工具
+1. 当前已完成严格 JSON Schema、单次非流式受控参数修复、可审计修复 Token，以及
+   业务/合成/诊断三类流量隔离；实际工具执行、授权与沙箱仍由应用负责。
+2. 固定门禁由 40 个基础闭环和 4 个韧性场景组成，覆盖多步调用、`is_error` 恢复、
+   Tool Result 指令注入和约 32KB 结果；后续继续扩充并行和客户端放弃场景。
+3. 下一优先级是验证器驱动的 `fast -> code -> deep` 自适应升级，并以编译器、测试和工具
    反馈增强代码与 Agent 任务。
-5. 保留 128K 容量，但通过上下文压缩和检索把日常工作集尽量控制在 32K 内。
+4. 保留 128K 容量，但通过上下文压缩和检索把日常工作集尽量控制在 32K 内。
 
 The next phase builds on schema-complete Tool Use, closed-loop evaluation, and
 stream-only TTFT with bounded repair, multi-step/error-recovery cases, explicit

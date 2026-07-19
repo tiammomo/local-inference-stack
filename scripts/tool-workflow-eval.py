@@ -79,6 +79,7 @@ def request_message(
     model: str,
     tools: list[dict[str, Any]],
     messages: list[dict[str, Any]],
+    system: str | None = None,
 ) -> tuple[dict[str, Any], float]:
     payload = {
         "model": model,
@@ -89,6 +90,8 @@ def request_message(
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
         "messages": messages,
     }
+    if system:
+        payload["system"] = system
     request = urllib.request.Request(
         base_url.rstrip("/") + "/v1/messages",
         data=json.dumps(payload, ensure_ascii=False).encode(),
@@ -96,6 +99,7 @@ def request_message(
             "Content-Type": "application/json",
             "x-api-key": token,
             "anthropic-version": "2023-06-01",
+            "x-modelport-traffic-class": "synthetic",
         },
         method="POST",
     )
@@ -117,16 +121,65 @@ def assert_contains(text: str, values: list[str]) -> bool:
     return all(str(value).casefold() in folded for value in values)
 
 
-def execute_mock_tool(case: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
+def execute_mock_tool(
+    case: dict[str, Any], call: dict[str, Any], step: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Return the deterministic synthetic result only after exact dispatch validation."""
-    if call.get("name") != case.get("expectedTool"):
+    contract = step or case
+    if call.get("name") != contract.get("expectedTool"):
         raise ValueError("unexpected tool selection")
-    if call.get("input") != case.get("expectedInput"):
+    if call.get("input") != contract.get("expectedInput"):
         raise ValueError("tool arguments do not match the scenario contract")
-    result = case.get("toolResult")
+    result = contract.get("toolResult")
     if not isinstance(result, dict):
         raise ValueError("synthetic tool returned a non-object result")
+    result = dict(result)
+    repeat = contract.get("toolResultRepeat")
+    if repeat is not None:
+        if not isinstance(repeat, dict) or not isinstance(repeat.get("field"), str):
+            raise ValueError("invalid synthetic repeat result contract")
+        count = int(repeat.get("count") or 0)
+        if count < 1 or count > 16_384:
+            raise ValueError("synthetic repeat result count is out of bounds")
+        result[repeat["field"]] = str(repeat.get("value") or "") * count
     return result
+
+
+def expected_steps(case: dict[str, Any]) -> list[dict[str, Any]]:
+    steps = case.get("steps")
+    if steps is not None:
+        if not isinstance(steps, list):
+            raise ValueError("steps must be an array")
+        return steps
+    if case.get("expectedTool") is None:
+        return []
+    return [
+        {
+            "expectedTool": case["expectedTool"],
+            "expectedInput": case["expectedInput"],
+            "toolResult": case["toolResult"],
+        }
+    ]
+
+
+def outcome(
+    passed: bool,
+    stage: str,
+    rounds: int,
+    latency_ms: float,
+    input_tokens: int,
+    output_tokens: int,
+    tool_steps: int,
+) -> dict[str, Any]:
+    return {
+        "passed": passed,
+        "stage": stage,
+        "rounds": rounds,
+        "toolSteps": tool_steps,
+        "latencyMs": round(latency_ms, 2),
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+    }
 
 
 def evaluate_case(
@@ -136,97 +189,121 @@ def evaluate_case(
     tools: list[dict[str, Any]],
     case: dict[str, Any],
 ) -> dict[str, Any]:
-    first, first_ms = request_message(
-        base_url, token, model, tools, [{"role": "user", "content": case["promptTemplate"]}]
-    )
-    calls = [block for block in first.get("content", []) if block.get("type") == "tool_use"]
-    expected_tool = case.get("expectedTool")
-    usage = first.get("usage", {})
-    input_tokens = int(usage.get("input_tokens") or 0)
-    output_tokens = int(usage.get("output_tokens") or 0)
-    if expected_tool is None:
-        passed = not calls and assert_contains(text_from(first), case["finalContains"])
-        return {
-            "passed": passed,
-            "stage": "direct_answer" if passed else "unexpected_tool_or_answer",
-            "rounds": 1,
-            "latencyMs": round(first_ms, 2),
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-        }
-    if len(calls) != 1:
-        return {
-            "passed": False,
-            "stage": "tool_call_count",
-            "rounds": 1,
-            "latencyMs": round(first_ms, 2),
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-        }
-    call = calls[0]
-    if (
-        first.get("stop_reason") != "tool_use"
-        or not isinstance(call.get("id"), str)
-        or not call["id"]
-    ):
-        return {
-            "passed": False,
-            "stage": "tool_terminal_contract",
-            "rounds": 1,
-            "latencyMs": round(first_ms, 2),
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-        }
-    try:
-        tool_result = execute_mock_tool(case, call)
-    except ValueError:
-        return {
-            "passed": False,
-            "stage": "tool_selection_or_arguments",
-            "rounds": 1,
-            "latencyMs": round(first_ms, 2),
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-        }
-    second, second_ms = request_message(
-        base_url,
-        token,
-        model,
-        tools,
-        [
-            {"role": "user", "content": case["promptTemplate"]},
-            {"role": "assistant", "content": first["content"]},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call["id"],
-                        "content": json.dumps(tool_result, ensure_ascii=False),
-                    }
-                ],
-            },
-        ],
-    )
-    second_calls = [
-        block for block in second.get("content", []) if block.get("type") == "tool_use"
+    steps = expected_steps(case)
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": case["promptTemplate"]}
     ]
-    usage = second.get("usage", {})
-    input_tokens += int(usage.get("input_tokens") or 0)
-    output_tokens += int(usage.get("output_tokens") or 0)
-    passed = (
-        not second_calls
-        and second.get("stop_reason") not in {"tool_use", "max_tokens"}
-        and assert_contains(text_from(second), case["finalContains"])
+    total_ms = 0.0
+    input_tokens = 0
+    output_tokens = 0
+    completed_steps = 0
+    for round_index in range(1, len(steps) + 2):
+        body, latency_ms = request_message(
+            base_url,
+            token,
+            model,
+            tools,
+            messages,
+            case.get("system"),
+        )
+        total_ms += latency_ms
+        usage = body.get("usage", {})
+        input_tokens += int(usage.get("input_tokens") or 0)
+        output_tokens += int(usage.get("output_tokens") or 0)
+        calls = [
+            block for block in body.get("content", []) if block.get("type") == "tool_use"
+        ]
+        if not calls:
+            if completed_steps != len(steps):
+                return outcome(
+                    False,
+                    "premature_final_answer",
+                    round_index,
+                    total_ms,
+                    input_tokens,
+                    output_tokens,
+                    completed_steps,
+                )
+            text = text_from(body)
+            passed = (
+                body.get("stop_reason") not in {"tool_use", "max_tokens"}
+                and assert_contains(text, case["finalContains"])
+                and not any(
+                    marker.casefold() in text.casefold()
+                    for marker in case.get("finalExcludes", [])
+                )
+            )
+            stage = "direct_answer" if passed and not steps else "completed"
+            return outcome(
+                passed,
+                stage if passed else "final_answer",
+                round_index,
+                total_ms,
+                input_tokens,
+                output_tokens,
+                completed_steps,
+            )
+        if len(calls) != 1 or completed_steps >= len(steps):
+            return outcome(
+                False,
+                "tool_call_count",
+                round_index,
+                total_ms,
+                input_tokens,
+                output_tokens,
+                completed_steps,
+            )
+        call = calls[0]
+        if (
+            body.get("stop_reason") != "tool_use"
+            or not isinstance(call.get("id"), str)
+            or not call["id"]
+        ):
+            return outcome(
+                False,
+                "tool_terminal_contract",
+                round_index,
+                total_ms,
+                input_tokens,
+                output_tokens,
+                completed_steps,
+            )
+        step = steps[completed_steps]
+        try:
+            tool_result = execute_mock_tool(case, call, step)
+        except ValueError:
+            return outcome(
+                False,
+                "tool_selection_or_arguments",
+                round_index,
+                total_ms,
+                input_tokens,
+                output_tokens,
+                completed_steps,
+            )
+        result_block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": call["id"],
+            "content": json.dumps(tool_result, ensure_ascii=False),
+        }
+        if step.get("isError") is True:
+            result_block["is_error"] = True
+        messages.extend(
+            [
+                {"role": "assistant", "content": body["content"]},
+                {"role": "user", "content": [result_block]},
+            ]
+        )
+        completed_steps += 1
+    return outcome(
+        False,
+        "round_limit",
+        len(steps) + 1,
+        total_ms,
+        input_tokens,
+        output_tokens,
+        completed_steps,
     )
-    return {
-        "passed": passed,
-        "stage": "completed" if passed else "final_answer",
-        "rounds": 2,
-        "latencyMs": round(first_ms + second_ms, 2),
-        "inputTokens": input_tokens,
-        "outputTokens": output_tokens,
-    }
 
 
 def main() -> int:
@@ -237,10 +314,14 @@ def main() -> int:
         raise SystemExit("MODELPORT_AUTH_TOKEN is required")
     base_url = os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
     model = os.environ.get("TOOL_WORKFLOW_MODEL", "qwen3.5-code")
-    suite = json.loads(args.cases.read_text(encoding="utf-8"))
+    cases_path = args.cases.resolve()
+    suite = json.loads(cases_path.read_text(encoding="utf-8"))
     cases = expand_cases(suite)
-    if len(cases) < 40:
-        raise SystemExit(f"expected at least 40 expanded cases, found {len(cases)}")
+    minimum_cases = int(suite.get("minimumCases", 40))
+    if len(cases) < minimum_cases:
+        raise SystemExit(
+            f"expected at least {minimum_cases} expanded cases, found {len(cases)}"
+        )
     if args.smoke:
         cases = [case for case in cases if case["smoke"]]
     if args.case_ids:
@@ -261,6 +342,7 @@ def main() -> int:
                     "passed": False,
                     "stage": type(error).__name__,
                     "rounds": 0,
+                    "toolSteps": 0,
                     "latencyMs": round((time.monotonic() - started) * 1000, 2),
                     "inputTokens": 0,
                     "outputTokens": 0,
@@ -283,7 +365,11 @@ def main() -> int:
     evidence = {
         "schemaVersion": 1,
         "generatedAt": datetime.now(UTC).isoformat(),
-        "suite": str(args.cases.relative_to(ROOT_DIR)),
+        "suite": (
+            str(cases_path.relative_to(ROOT_DIR))
+            if cases_path.is_relative_to(ROOT_DIR)
+            else str(cases_path)
+        ),
         "mode": "smoke" if args.smoke else "full",
         "trials": args.trials,
         "summary": {
