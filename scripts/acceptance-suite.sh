@@ -118,6 +118,9 @@ standard_suite() {
     printf 'standard requires MODELPORT_PROJECT_DIR pointing to a compatible ModelPort checkout.\n' >&2
     exit 2
   fi
+  run_step "Cross-repository provider contract" \
+    python3 "$ROOT_DIR/scripts/compatibility-check.py" \
+      --modelport-project "$MODELPORT_DIR"
   run_step "Artifact integrity" "$ROOT_DIR/scripts/verify-models.sh" --active --cached
   run_step "ModelPort Messages" "$ROOT_DIR/scripts/modelport-smoke.sh"
   run_step "Exact token counting" "$ROOT_DIR/scripts/modelport-token-count-smoke.sh"

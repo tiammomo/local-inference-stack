@@ -49,7 +49,8 @@ scripts/tool-workflow-eval.py --case calculator-add --trials 3
 `tool_result` 返回，并要求下一轮给出包含预期事实的最终正文且不得再次误调用。证据仅
 保存 Case ID、阶段、轮数、工具步数、延迟、Token 和通过结果。Mock Executor 只用于
 验收，不进入 ModelPort 网关或生产应用。韧性集已经覆盖多步、错误恢复、注入与有界
-大结果；剩余并行、客户端放弃和连续稳定性范围见
+大结果。ModelPort Mock 已覆盖双并行调用和交错流式参数；剩余真实模型并行闭环、
+客户端放弃和连续稳定性范围见
 [`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
 
 ## 独立候选端口

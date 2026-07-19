@@ -24,9 +24,10 @@
     "slotSavePath": "/cache/slots"
   },
   "gateway": {
-    "sourceCommit": "311e18a0a6a52be76a03d9672d5fdf2942bec8c4",
+    "sourceCommit": "4efaf4a29edaabbfa26fba5fcdeae0915ef17ac5",
+    "sourceState": "clean",
     "containerImage": "modelport:local",
-    "containerImageId": "sha256:40db99c6780d08a83a29fca72f98b4a7e5a62366962819fcdd666d1c90231843",
+    "containerImageId": "sha256:9109473065ef6a0923abce0af5d2ea927ab8f167dc578e4d266d2009059f2ad0",
     "containerName": "modelport-modelport-1"
   },
   "hardware": {
@@ -57,9 +58,10 @@
     "composeSha256": "db14fefef6b18804271861fc79e286b2e13fde40327059f494a23479ff494b3d",
     "latencyProfileSha256": "d062afdafe4106735a7b9d3cb32122532688a74d9ac0eba8009413a90dbeb200",
     "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
-    "providerContractSha256": "a63730ea755e38276e9b62ee104f876b68759f7e3fdf813d6964a8bcd30360e3",
+    "providerContractSha256": "b20737ece26cc9bc0958ebc5282c56c4208830e5e3f90b8472e48ed08d40d295",
     "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
-    "acceptanceSuiteSha256": "190831a62865db8ce269be71d60a306841b2ee91518ef5339121974cddb280e7",
+    "acceptanceSuiteSha256": "8a36f0e22adacc159ae6dac861352a04e4eb0a23ff43fac354b36e36421b9291",
+    "compatibilityCheckSha256": "818426008e62a73a51198da5ba6c635819ba9de0b6b8a1e0e671f9f353872148",
     "modelCatalogSha256": "6c8b35888983a844e80dcf9b7c4765cb74564da00bbf54a94e62a32d926e8ed8",
     "modelManagerSha256": "a610f7c4b0cb6cc639a715f924a7a0d0f35b8ee36e891aa1aebba59279da32be",
     "toolWorkflowSuiteSha256": "c6008e01efbd313c8d338c9f3c7e02cbaa6a5facac059efbdfe19d0492ad538a",

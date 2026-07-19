@@ -21,8 +21,9 @@ ModelPort Anthropic Messages 入口。
 
 第二批新增：非流式严格 Schema 失败后的单次同 Provider 修复、双尝试 Token/账本合并、
 显式 traffic class、两步依赖工作流、`is_error` 恢复、Tool Result Prompt Injection 与
-约 32KB 大结果门禁。尚未完成：Reasoning/正文 Token 拆分、验证器驱动的档位升级、
-并行工作流和客户端放弃/过期状态。
+约 32KB 大结果门禁。第三批补充了跨仓库契约检查、fast/code/deep 默认思考策略和
+ModelPort 双并行/交错参数协议验收。尚未完成：Reasoning/正文 Token 拆分、应用侧
+验证器驱动升级、真实模型并行闭环和客户端放弃/过期状态。
 
 ## 目标
 

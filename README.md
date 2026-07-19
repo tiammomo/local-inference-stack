@@ -129,6 +129,7 @@ baseline remain estimates until tested on the target machine.
 - [当前 5070 Ti 部署档案](deployments/qwen3.5-9b-rtx5070ti/README.md)
 - [优化证据](docs/OPTIMIZATION.md)
 - [推理与 Tool Use 路线](docs/ENHANCEMENT_ROADMAP.md)
+- [Local Inference Stack × ModelPort 发布契约](docs/CROSS_REPOSITORY_RELEASE.md)
 
 ## 安全边界
 

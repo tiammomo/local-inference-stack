@@ -4,7 +4,10 @@
 
 机器可读契约为
 [`contracts/local-qwen-provider-v1.json`](../contracts/local-qwen-provider-v1.json)。
-契约版本变化必须同时通过 `scripts/acceptance-suite.sh standard`，不能只修改一侧配置。
+契约版本变化必须先通过 `scripts/compatibility-check.py --modelport-project <path>`，
+再通过 `scripts/acceptance-suite.sh standard`，不能只修改一侧配置。正式发布还要执行
+`--release`，验证双仓库 clean 状态和 manifest 固定的 ModelPort commit；详见
+[`CROSS_REPOSITORY_RELEASE.md`](CROSS_REPOSITORY_RELEASE.md)。
 
 ModelPort 使用部署级 provider `local_qwen` 表达业务身份，llama.cpp 只是
 `infra/local-inference-stack` 可独立替换的推理引擎实现。服务端使用以下稳定标识：
@@ -59,7 +62,7 @@ reason 和每个工具的完整 `input_schema`。非流式违规响应直接失�
 `repair_invalid_arguments=true`：只对非流式 strict Schema 失败做一次同 Provider 修复；
 完整边界见 [`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
 
-推理服务默认开启思考。ModelPort 将 Anthropic `thinking` 映射为 llama.cpp 的
+推理服务保留默认思考能力。ModelPort 将 Anthropic `thinking` 映射为 llama.cpp 的
 `chat_template_kwargs.enable_thinking` 和 `thinking_budget_tokens`。应用应把渲染后
 输入控制在约 92K，并允许最多 32,768 输出 tokens，不要把 128K 容量全部分配给输入。
 
@@ -67,10 +70,11 @@ reason 和每个工具的完整 `input_schema`。非流式违规响应直接失�
 
 | ModelPort model | 默认思考预算 | 默认采样 | 用途 |
 | --- | ---: | --- | --- |
-| `qwen3.5-fast` | 512 | 通用思考 | 短问答、分类、简单工具选择 |
-| `qwen3.5-code` | 4,096 | temperature 0.6、presence 0 | 日常编码和 Agent，推荐默认 |
-| `qwen3.5-deep` | 16,384 | 通用思考 | 复杂调试与架构推理 |
+| `qwen3.5-fast` | 默认关闭 / 512 | 通用思考 | 短问答、分类、简单工具选择 |
+| `qwen3.5-code` | 默认开启 / 4,096 | temperature 0.6、presence 0 | 日常编码和 Agent，推荐默认 |
+| `qwen3.5-deep` | 默认开启 / 16,384 | 通用思考 | 复杂调试与架构推理 |
 
+档位的默认开关同时适用于 Anthropic 未显式设置和 OpenAI Chat Completions 客户端。
 客户端显式 `thinking.budget_tokens` 优先于档位默认值；显式
 `thinking.type="disabled"` 会关闭该请求的思考。客户端显式采样值也优先于档位
 默认；未匹配逻辑别名的模型保持运行时默认值。
@@ -166,11 +170,13 @@ curl --noproxy '*' http://127.0.0.1:38082/v1/messages/count_tokens \
 7. 三个逻辑档位、显式预算和 `thinking.type="disabled"` 均按预期映射。
 8. `scripts/modelport-token-count-smoke.sh` 的直连与 ModelPort 精确计数一致。
 9. 严格 Tool Use 响应校验拒绝未声明工具、非法参数和并行/choice 违约；正常的
-   非流式、流式、`is_error` 及 tool-result continuation 全部通过。
+   非流式、流式、双并行调用、交错参数分片、`is_error` 及 tool-result continuation
+   全部通过。
 10. `scripts/modelport-context-admission-smoke.sh` 验证硬超限请求被拒绝且不静默截断。
 
-当前第 9 项中的“非法参数”指非法 JSON 或非 Object。完整 Schema 违约、多工具选择、
-多步执行和最终任务正确性属于下一阶段的闭环门禁，不能用当前通过结果代替。
+ModelPort Mock 验收覆盖完整 Schema 违约和双并行协议映射；本项目真实模型闭环已经覆盖
+多工具选择、多步执行和最终任务正确性。真实模型的并行闭环、客户端放弃和过期状态
+仍是下一阶段门禁，不能用 Mock 通过结果代替。
 
 只有在上述测试发现可复用的协议问题时才修改 ModelPort adapter。协议转换仍应
 保持 OpenAI-compatible 通用；具体模型名称、展示和费率只进入部署配置。

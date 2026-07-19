@@ -20,5 +20,8 @@
 [部署记录](../../docs/DEPLOYMENT_RECORD.md)，参数依据见
 [优化文档](../../docs/OPTIMIZATION.md)。
 
+ModelPort commit、镜像来源标签与 Provider 配置的联合发布流程见
+[跨仓库发布契约](../../docs/CROSS_REPOSITORY_RELEASE.md)。
+
 此目录描述部署身份；可执行配置仍由根目录 `compose.yaml`、`profiles/` 和
 `scripts/` 维护，避免同一配置出现两份可执行来源。

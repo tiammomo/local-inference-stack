@@ -36,7 +36,8 @@ scripts/acceptance-suite.sh full
 ```
 
 `quick` 是无密钥的独立部署门禁；`standard` 用于当前 9B Provider 的 ModelPort、
-Token 和 Tool Use 协议变更，需要显式设置 `MODELPORT_PROJECT_DIR`；`full` 用于模型、
+Token 和 Tool Use 协议变更，需要显式设置 `MODELPORT_PROJECT_DIR`；standard 会先
+执行机器可读跨仓库配置检查。`full` 用于模型、
 量化、KV、上下文、Slot、镜像或重大版本升级。三档都会 fail-fast 并执行真实调用。
 
 每次执行默认在 `logs/acceptance/` 保存权限为 `0600` 的文本日志和机器可读 JSON
@@ -47,6 +48,14 @@ Token 和 Tool Use 协议变更，需要显式设置 `MODELPORT_PROJECT_DIR`；`
 
 ```bash
 scripts/verify-deployment.py
+```
+
+发布前还要验证两个仓库的提交状态与 manifest：
+
+```bash
+python3 scripts/compatibility-check.py \
+  --modelport-project "$MODELPORT_ROOT" \
+  --release
 ```
 
 需要单项复验时使用以下底层命令：
@@ -116,7 +125,7 @@ scripts/tool-workflow-eval.py --smoke
 两项均无 OOM 或截断。完整数据见 [DEPLOYMENT_RECORD.md](DEPLOYMENT_RECORD.md)。
 
 精确 Token 计数也已通过：包含中文 system、混合消息和 Tool Schema 的请求会先把
-直连侧渲染参数对齐到 ModelPort `qwen3.5-code` 的默认关闭思考策略，再要求双方完全
+直连侧渲染参数对齐到 ModelPort `qwen3.5-code` 的默认开启思考策略，再要求双方完全
 一致。数值可能随已审查的模板版本变化，门禁比较的是同一模板语义而不是固定常数。
 
 双 Slot 不是必须生产项，但其 profile 已通过两路并发 A/B：聚合吞吐

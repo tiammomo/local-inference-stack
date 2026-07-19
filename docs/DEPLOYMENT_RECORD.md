@@ -34,8 +34,8 @@
 | --- | --- |
 | llama.cpp OCI digest | `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8` |
 | llama.cpp build | `10015`，commit `12127defd` |
-| ModelPort 源码 | commit `311e18a`，已推送 `tiammomo/ModelPort` 的 `main` |
-| ModelPort 本地镜像 ID | `sha256:40db99c6780d08a83a29fca72f98b4a7e5a62366962819fcdd666d1c90231843` |
+| ModelPort 源码 | commit `4efaf4a`，本地 `main`，待推送 |
+| ModelPort 本地镜像 ID | `sha256:9109473065ef6a0923abce0af5d2ea927ab8f167dc578e4d266d2009059f2ad0` |
 | Dashboard 本地镜像 ID | `sha256:99cb2838e274b4042a3b7fbe4842ad0370b8a83ec5a767eb70df44c343f1b850` |
 | Q5_K_M SHA256 | `dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c` |
 | MTP Q5_K_M SHA256 | `1732d6616554b102be9bc41684cd094f471e1b3067f5e5a89eb5a86a5a4f2a6c`，仅保留用于 A/B |
@@ -53,10 +53,10 @@
 | 直连生成 | 通过 | OpenAI Chat Completions 返回预期中文 |
 | 显式 Reasoning | 通过 | 请求级开启后同时返回 `reasoning_content` 和正确正文 |
 | ModelPort 思考映射 | 通过 | 128-token 预算返回 42/138 output tokens；关闭思考返回 42/3 output tokens，无标签泄漏 |
-| ModelPort 采样档位 | 通过 | fast/code/deep 均可路由；code 使用精确编码参数；显式请求参数优先 |
+| ModelPort 推理档位 | 通过 | fast 默认关闭思考，code/deep 默认开启；预算和采样随逻辑别名解析，显式请求参数优先 |
 | ModelPort 生成 | 通过 | Anthropic Messages 经 `local_qwen` 返回预期中文 |
 | ModelPort 流式 | 通过 | provider matrix 的非流式与流式均 PASS |
-| ModelPort Tool Use | 通过 | 严格模式下非流式、完整参数流式与 continuation 均 PASS；Mock 拒绝未声明工具、非对象参数及完整 JSON Schema 违规 |
+| ModelPort Tool Use | 通过 | 严格模式下非流式、完整参数流式、双并行交错参数与 continuation 均 PASS；Mock 拒绝未声明工具、非对象参数及完整 JSON Schema 违规 |
 | 闭环 Tool Use | 通过 | 5 Case standard 冒烟 5/5；当前多步 Harness 全量 40/40（`logs/quality/20260719T063452Z-tool-workflow-full.json`），覆盖选择、Schema、Mock 执行、`tool_result` 续轮和 auto 不调用 |
 | Tool 参数受控修复 | 通过 | Rust 顺序 Mock 首次 strict Schema 失败、第二次恢复；`retryCount=1`，22/5 Token 合并，attempted/recovered 为真且不误记 fallback；真实 Qwen 合法调用无需触发修复 |
 | Tool 韧性集 | 通过 | 4/4：两工具依赖链、`is_error=true` 换仓恢复、Tool Result 指令注入防护、约 32KB 大结果摘要；分别为 3/3/2/2 轮 |
@@ -72,7 +72,8 @@
 | 运行台只读边界 | 通过 | 仅回环监听；POST 405；非法窗口 400；越界/缺失资源 404；WebSocket 非同源 Origin 403；安全响应头生效 |
 | ModelPort 精确 Token 计数 | 通过 | 中文 system、混合消息和 Tool Schema：直连与逻辑别名均为 282；关闭思考模板均为 15 |
 | ModelPort 上下文准入 | 通过 | `15 + 131072 > 131072` 在占用 Slot 前返回 400；错误含精确数值和“不静默截断”保证；思考输入建议上限 94,208 |
-| 部署漂移检查 | 通过 | 51/51；新增 ModelPort 镜像 ID、容器健康、非 root、只读根文件系统、drop ALL、no-new-privileges 与 loopback 绑定检查 |
+| 跨仓库配置契约 | 通过 | 24/24；Provider、模型别名、默认思考、预算、Tool Use 和 Token/上下文限制一致 |
+| 部署漂移检查 | 通过 | 55/55；包含 ModelPort commit、clean OCI source-state、镜像 ID、容器加固、配置哈希和模型完整性 |
 | 合成质量门禁 | 通过 | 10 个 Case × 3 次，共 30/30；覆盖推理、指令、抽取、JSON、代码、多语言和 Tool Use |
 | Tool Use 结果观测 | 通过 | 请求级区分 `tool_called/final_answer/answered_without_tool/completed_unobserved` 与错误终态；不保留工具内容 |
 | 持久化错误脱敏 | 通过 | usage、request/attempt ledger、Provider/credential health 只保留错误类别；迁移 4 已重写 25 条 request、22 条 attempt 与 96 条 usage 历史错误，Schema 路径和高置信度 token 痕迹均为 0 |
@@ -82,7 +83,7 @@
 | Runtime 最小权限 | 通过 | UID/GID `1000:1000`、只读根文件系统、drop ALL、no-new-privileges、仅回环端口 |
 | KV 快照实验 | 通过 | Slot 0 合成前缀保存/恢复成功；140 tokens、55,132,240 bytes、文件权限 `0600` |
 | 串行候选/恢复演练 | 通过 | `18081` 候选经直连、ModelPort、Reasoning、Token、准入、Tool Use 和质量 4/4；候选清理后生产自动恢复 |
-| ModelPort 基线仓库检查 | 通过 | 312 个 Rust lib 测试与 6 个配置测试通过；Clippy `-D warnings`、前端 88/88、npm audit 0、RustSec audit 0、Mock 修复、Schema 拒绝和真实上游验收通过 |
+| ModelPort 基线仓库检查 | 通过 | 321 个 Rust lib 测试与 6 个配置测试通过；Clippy `-D warnings`、前端 88/88、配置/文档门禁、Mock 修复、并行协议和真实上游验收通过 |
 | 118K 上下文 | 通过 | 冷缓存 118,062 prompt tokens，准确召回中部验收码 |
 | 长上下文延迟 | 42.61 s | 最终配置的请求端到端；服务端约 2,807 tok/s |
 | ModelPort 92K 思考冷链路 | 通过 | 92,063 input / 554 output tokens，39.26 s，正文精确匹配 |
@@ -101,6 +102,7 @@
 | Provider 身份与计费复验 | 通过 | Quant Key 调用 `local_qwen`；17 input / 4 output tokens；`upstream-returned`；内部费用 `$0.00000685` |
 | 2026-07-19 Tool Reliability standard | 通过 | `logs/acceptance/20260719T063149Z-standard.json`；基础闭环 5/5、韧性 4/4、质量 4/4，最终 ModelPort 镜像健康 |
 | 2026-07-19 安全复验 standard | 通过 | `logs/acceptance/20260719T070612Z-standard.json`；安全镜像重建后基础链路、Reasoning、Token、准入、Tool Use、闭环 5/5、韧性 4/4、质量 4/4 全通过 |
+| 2026-07-19 自适应档位与契约复验 | 通过 | `logs/acceptance/20260719T113410Z-standard.json`；精确 Token 282=282、契约 24/24、Tool 闭环 5/5、韧性 4/4、质量 4/4；92K 思考召回另行通过 |
 
 ## 服务现状
 

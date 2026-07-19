@@ -41,9 +41,9 @@ base = {
 for path, model in zip(sys.argv[1:3], (sys.argv[3], "qwen3.5-code")):
     payload = {"model": model, **base}
     # ModelPort's local_qwen policy defaults logical code requests to
-    # enable_thinking=false. Count the equivalent rendered direct template.
+    # enable_thinking=true. Count the equivalent rendered direct template.
     if model != "qwen3.5-code":
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
     pathlib.Path(path).write_text(json.dumps(payload, ensure_ascii=False))
 PY
 

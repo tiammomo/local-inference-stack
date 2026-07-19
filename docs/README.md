@@ -12,6 +12,7 @@ Catalog 推荐；当前唯一实机验证档案是 Qwen3.5-9B Q5_K_M / RTX 5070 
 - [模型 Catalog](../catalog/models.json)：推荐、制品、哈希与运行参数的唯一数据源。
 - [当前部署档案](../deployments/qwen3.5-9b-rtx5070ti/README.md)：Qwen3.5-9B / RTX 5070 Ti / 128K 身份与机器可读基线。
 - [Provider 契约](../contracts/local-qwen-provider-v1.json)：本项目与 ModelPort 的版本化能力边界。
+- [CROSS_REPOSITORY_RELEASE.md](CROSS_REPOSITORY_RELEASE.md)：双仓库兼容检查、镜像来源标签和发布顺序。
 - [ARCHITECTURE.md](ARCHITECTURE.md)：目标、边界、架构和容量设计。
 - [OPTIMIZATION.md](OPTIMIZATION.md)：优化参数、A/B 数据、适用边界和后续候选。
 - [ENHANCEMENT_ROADMAP.md](ENHANCEMENT_ROADMAP.md)：推理增强、Tool Use Reliability v2、指标口径和分层实施顺序。
@@ -32,7 +33,7 @@ Catalog 推荐；当前唯一实机验证档案是 Qwen3.5-9B Q5_K_M / RTX 5070 
 - 运行环境：Ubuntu 24.04 / WSL2；WSL 当前可见约 70GiB RAM。
 - 推理：llama.cpp CUDA 容器、Q5_K_M 权重、Q8_0 KV Cache、8GiB 精确前缀缓存。
 - 服务：单 Slot、128K 总上下文、默认最多生成 32K tokens。
-- Reasoning：默认开启；ModelPort 提供 fast/code/deep 三档预算；生产建议将渲染后输入控制在约 92K。
+- Reasoning：运行时保留 128K 思考能力；ModelPort 的 fast 默认关闭、code/deep 默认开启，客户端显式设置优先。
 - Sampling：code 使用精确编码参数，fast/deep 使用通用思考参数，显式请求值优先。
 - Token 预算：ModelPort 提供与 llama.cpp/Qwen tokenizer 一致的精确 Count Tokens 接口。
 - 上下文准入：总预算超过 128K 或思考输入超过约 92K 时 fail-closed，绝不静默截断。
@@ -45,7 +46,7 @@ Catalog 推荐；当前唯一实机验证档案是 Qwen3.5-9B Q5_K_M / RTX 5070 
 - 端口：Qwen 直连诊断 `127.0.0.1:18080`；ModelPort `127.0.0.1:38082`。
 - 已淘汰：当前后端上的 q4 KV、非精确 cache reuse 和 MTP 默认启用，具体 A/B 见优化文档。
 - Profile：默认 `latency` 为单 Slot 128K；可选 `throughput` 为双 Slot 64K，双请求聚合吞吐约提升 67.9%。
-- 下一阶段：优先实现有边界协议修复、多步/错误恢复、验收 traffic class 和验证器驱动的自适应推理；Q6_K、MTP 和原生构建继续作为候选 A/B，不直接进入生产。
+- 下一阶段：应用侧实现验证器驱动升级与上下文压缩，本项目继续扩展真实硬件证据；Q6_K、MTP 和原生构建只作为候选 A/B。
 
 ## 优化落点速查
 

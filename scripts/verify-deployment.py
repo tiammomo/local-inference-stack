@@ -131,6 +131,17 @@ def main() -> int:
         modelport_container.get("Config", {}).get("Image"),
         gateway["containerImage"],
     )
+    modelport_labels = modelport_container.get("Config", {}).get("Labels", {}) or {}
+    check(
+        "ModelPort source revision label",
+        modelport_labels.get("org.opencontainers.image.revision"),
+        gateway["sourceCommit"],
+    )
+    check(
+        "ModelPort source state label",
+        modelport_labels.get("io.modelport.source-state"),
+        gateway["sourceState"],
+    )
     check(
         "ModelPort unprivileged user",
         modelport_container.get("Config", {}).get("User"),
@@ -212,6 +223,11 @@ def main() -> int:
         "model manager SHA256",
         sha256(ROOT_DIR / "scripts" / "model-manager.py"),
         configuration["modelManagerSha256"],
+    )
+    check(
+        "compatibility checker SHA256",
+        sha256(ROOT_DIR / "scripts" / "compatibility-check.py"),
+        configuration["compatibilityCheckSha256"],
     )
     check(
         "Tool workflow suite SHA256",
