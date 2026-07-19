@@ -101,6 +101,21 @@ owns authentication, routing, quotas, accounting, public API protocols, and
 reusable Tool Use adaptation. Applications own prompts, RAG, agents, and
 business tools.
 
+优化实现遵循同一边界：
+
+| 层次 | 后续优化落点 |
+| --- | --- |
+| 本项目 | Q5/Q6、KV、128K、llama.cpp、缓存、性能 A/B、闭环质量集、候选发布和运行台 |
+| ModelPort | Tool JSON Schema 校验、流式协议修复、工作流状态、Token 准入、逻辑 Profile 和网关指标 |
+| 应用 / Agent | Tool Registry、实际执行、权限审批、沙箱、幂等，以及基于测试反馈的 `fast -> code -> deep` 升级 |
+
+ModelPort 不执行任意业务工具，本项目也不复制它的协议实现。跨仓库改动先更新稳定
+Provider 契约，再由本项目通过真实上游验收。
+
+The same ownership applies to optimization work: this repository owns runtime
+and evaluation, ModelPort owns reusable protocol behavior and telemetry, and
+applications own tool execution, safety, and verifier-driven escalation.
+
 The retired `/home/tiammomo/projects/infra/models` path must not be recreated or
 used by scripts, services, or containers.
 

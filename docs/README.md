@@ -40,3 +40,16 @@ Qwen3.5-9B Q5_K_M / RTX 5070 Ti / 128K。
 - 已淘汰：当前后端上的 q4 KV、非精确 cache reuse 和 MTP 默认启用，具体 A/B 见优化文档。
 - Profile：默认 `latency` 为单 Slot 128K；可选 `throughput` 为双 Slot 64K，双请求聚合吞吐约提升 67.9%。
 - 下一阶段：优先完成完整 Tool Schema 校验、闭环工作流指标和验证器驱动的自适应推理；Q6_K、MTP 和原生构建继续作为候选 A/B，不直接进入生产。
+
+## 优化落点速查
+
+| 改动 | 所属位置 |
+| --- | --- |
+| 权重、量化、KV、上下文、llama.cpp、缓存和性能候选 | 本项目 |
+| Tool Schema、协议修复、工作流状态、Token 准入和逻辑 Profile | ModelPort |
+| 闭环合成验收、发布门禁与本地运行台 | 本项目，消费 ModelPort 聚合数据 |
+| 业务 Tool 执行、审批、沙箱、幂等和验证器驱动升级 | 应用 / Agent |
+
+跨层设计见 [PROJECT.md](PROJECT.md)，完整增强顺序见
+[ENHANCEMENT_ROADMAP.md](ENHANCEMENT_ROADMAP.md)，ModelPort 具体协议边界见
+[MODELPORT.md](MODELPORT.md)。
