@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODELPORT_DIR="${MODELPORT_DIR:-/home/tiammomo/projects/dev/ModelPort}"
-ENV_FILE="${MODELPORT_ENV_FILE:-$MODELPORT_DIR/.env}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${MODELPORT_ENV_FILE:-$ROOT_DIR/profiles/operations.secrets.env}"
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
+load_deployment_env "$ROOT_DIR"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
 
@@ -24,12 +27,14 @@ curl --noproxy '*' -fsS "$MODELPORT_ENDPOINT/v1/messages" \
   -H 'x-modelport-traffic-class: synthetic' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "local_qwen:qwen3.5-9b-q5km",
-    "max_tokens": 512,
-    "temperature": 0,
-    "messages": [{"role": "user", "content": "只回复：ModelPort 已连接本地 Qwen3.5"}]
-  }' > "$BODY_FILE"
+  --data-binary @- > "$BODY_FILE" <<JSON
+{
+  "model": "local_qwen:$QWEN_SERVED_MODEL_ID",
+  "max_tokens": 512,
+  "temperature": 0,
+  "messages": [{"role": "user", "content": "只回复：ModelPort 已连接本地 Qwen3.5"}]
+}
+JSON
 
 python3 - "$BODY_FILE" <<'PY'
 import json

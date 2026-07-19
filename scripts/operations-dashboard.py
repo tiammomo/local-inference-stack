@@ -212,6 +212,34 @@ class DashboardState:
         self.baseline = json.loads(
             (STATIC_DIR / "runtime-baseline.json").read_text(encoding="utf-8")
         )
+        self.baseline.update(
+            {
+                "displayName": os.environ.get(
+                    "QWEN_MODEL_DISPLAY_NAME", self.baseline["displayName"]
+                ),
+                "deploymentName": os.environ.get(
+                    "QWEN_SERVED_MODEL_ID", self.baseline["deploymentName"]
+                ),
+                "quantization": os.environ.get(
+                    "QWEN_QUANTIZATION", self.baseline["quantization"]
+                ),
+                "contextTokens": int(
+                    os.environ.get("QWEN_CTX_SIZE", self.baseline["contextTokens"])
+                ),
+                "recommendedInputTokens": int(
+                    os.environ.get(
+                        "QWEN_RECOMMENDED_INPUT_TOKENS",
+                        self.baseline["recommendedInputTokens"],
+                    )
+                ),
+                "maxOutputTokens": int(
+                    os.environ.get("QWEN_N_PREDICT", self.baseline["maxOutputTokens"])
+                ),
+                "promptCacheMiB": int(
+                    os.environ.get("QWEN_CACHE_RAM", self.baseline["promptCacheMiB"])
+                ),
+            }
+        )
         self.admin = self._new_admin()
 
     def _new_admin(self) -> Any:

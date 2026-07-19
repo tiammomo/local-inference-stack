@@ -1,23 +1,24 @@
 [Unit]
-Description=Qwen local model read-only operations dashboard
+Description=Local inference read-only operations dashboard
 After=network-online.target docker.service qwen-model-operations-report.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/tiammomo/projects/infra/local-inference-stack
+WorkingDirectory=@PROJECT_ROOT@
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
-EnvironmentFile=/home/tiammomo/projects/infra/local-inference-stack/profiles/operations.secrets.env
-EnvironmentFile=/home/tiammomo/projects/infra/local-inference-stack/profiles/operations.env
-ExecStart=/usr/bin/python3 /home/tiammomo/projects/infra/local-inference-stack/scripts/operations-dashboard.py --host 127.0.0.1 --port 33004
+EnvironmentFile=-@PROJECT_ROOT@/profiles/deployment.local.env
+EnvironmentFile=@PROJECT_ROOT@/profiles/operations.secrets.env
+EnvironmentFile=@PROJECT_ROOT@/profiles/operations.env
+ExecStart=/usr/bin/python3 @PROJECT_ROOT@/scripts/operations-dashboard.py --host 127.0.0.1 --port 33004
 Restart=on-failure
 RestartSec=3s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/tiammomo/projects/infra/local-inference-stack/logs/operations
+ReadWritePaths=@PROJECT_ROOT@/logs/operations
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

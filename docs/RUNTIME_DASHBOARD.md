@@ -1,5 +1,10 @@
 # 本地模型运行台
 
+模型名称、量化、上下文、输入/输出预算、Prompt Cache 和运行容器来自当前
+`deployment.local.env`；静态 `runtime-baseline.json` 只作为尚未选择 Catalog Profile
+时的 5070 Ti 回退。切换模型并重启运行台后，前端 WebSocket `hello` 会携带新的
+baseline，避免在其他硬件上继续展示 9B 固定值。
+
 ## 入口
 
 ```text

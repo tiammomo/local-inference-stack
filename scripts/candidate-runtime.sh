@@ -2,10 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-/home/tiammomo/projects/dev/ModelPort}"
+MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-}"
 PROFILE_FILE="$ROOT_DIR/profiles/candidate.env"
 ACTION="${1:-status}"
-PRODUCTION_CONTAINER="qwen35-9b-q5km"
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
+load_deployment_env "$ROOT_DIR"
+PRODUCTION_CONTAINER="$QWEN_CONTAINER_NAME"
 CANDIDATE_CONTAINER="qwen35-9b-candidate"
 CANDIDATE_URL="http://127.0.0.1:18081"
 
@@ -56,6 +59,10 @@ case "$ACTION" in
     "$ROOT_DIR/scripts/modelport-reasoning-smoke.sh"
     QWEN_BASE_URL="$CANDIDATE_URL" "$ROOT_DIR/scripts/modelport-token-count-smoke.sh"
     "$ROOT_DIR/scripts/modelport-context-admission-smoke.sh"
+    if [[ -z "$MODELPORT_DIR" || ! -x "$MODELPORT_DIR/scripts/tool-use-acceptance.sh" ]]; then
+      printf 'accept requires MODELPORT_PROJECT_DIR pointing to a compatible checkout.\n' >&2
+      exit 2
+    fi
     "$MODELPORT_DIR/scripts/tool-use-acceptance.sh" --upstream --max-tokens 2048
     python3 "$ROOT_DIR/scripts/quality-eval.py" --smoke
     ;;

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODELPORT_DIR="${MODELPORT_DIR:-/home/tiammomo/projects/dev/ModelPort}"
-ENV_FILE="${MODELPORT_ENV_FILE:-$MODELPORT_DIR/.env}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${MODELPORT_ENV_FILE:-$ROOT_DIR/profiles/operations.secrets.env}"
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
+load_deployment_env "$ROOT_DIR"
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -17,7 +20,7 @@ fi
 MODELPORT_ENDPOINT="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"
 QWEN_ENDPOINT="${QWEN_BASE_URL:-http://127.0.0.1:18080}"
 
-python3 - "$TEMP_DIR/direct-request.json" "$TEMP_DIR/modelport-request.json" <<'PY'
+python3 - "$TEMP_DIR/direct-request.json" "$TEMP_DIR/modelport-request.json" "$QWEN_SERVED_MODEL_ID" <<'PY'
 import json
 import pathlib
 import sys
@@ -35,8 +38,12 @@ base = {
         },
     }],
 }
-for path, model in zip(sys.argv[1:], ("qwen3.5-9b-q5km", "qwen3.5-code")):
+for path, model in zip(sys.argv[1:3], (sys.argv[3], "qwen3.5-code")):
     payload = {"model": model, **base}
+    # ModelPort's local_qwen policy defaults logical code requests to
+    # enable_thinking=false. Count the equivalent rendered direct template.
+    if model != "qwen3.5-code":
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     pathlib.Path(path).write_text(json.dumps(payload, ensure_ascii=False))
 PY
 

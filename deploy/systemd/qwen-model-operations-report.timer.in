@@ -1,5 +1,5 @@
 [Unit]
-Description=Generate the daily Qwen and ModelPort operations report
+Description=Generate the daily local inference operations report
 
 [Timer]
 OnCalendar=*-*-* 02:15:00

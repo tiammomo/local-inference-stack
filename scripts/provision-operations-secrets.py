@@ -11,7 +11,6 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = Path("/home/tiammomo/projects/dev/ModelPort/.env")
 DEFAULT_TARGET = ROOT_DIR / "profiles" / "operations.secrets.env"
 REQUIRED_KEYS = (
     "MODELPORT_ADMIN_USERNAME",
@@ -50,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="materialize a least-privilege operations environment file"
     )
-    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--source", type=Path, required=True, help="path to the ModelPort .env file")
     parser.add_argument("--target", type=Path, default=DEFAULT_TARGET)
     return parser.parse_args()
 

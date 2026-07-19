@@ -54,12 +54,14 @@
     "available": ["latency", "throughput"]
   },
   "configuration": {
-    "composeSha256": "822550608320dd252e6d53d4ebab5192917ed59b5f542cbebb9deb9670ac7412",
+    "composeSha256": "db14fefef6b18804271861fc79e286b2e13fde40327059f494a23479ff494b3d",
     "latencyProfileSha256": "d062afdafe4106735a7b9d3cb32122532688a74d9ac0eba8009413a90dbeb200",
     "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
     "providerContractSha256": "a63730ea755e38276e9b62ee104f876b68759f7e3fdf813d6964a8bcd30360e3",
     "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
-    "acceptanceSuiteSha256": "d40623463efc4fa5588531f0380c19cacf9c4da4921a3f4a52a67ab11d5f8473",
+    "acceptanceSuiteSha256": "190831a62865db8ce269be71d60a306841b2ee91518ef5339121974cddb280e7",
+    "modelCatalogSha256": "6c8b35888983a844e80dcf9b7c4765cb74564da00bbf54a94e62a32d926e8ed8",
+    "modelManagerSha256": "a610f7c4b0cb6cc639a715f924a7a0d0f35b8ee36e891aa1aebba59279da32be",
     "toolWorkflowSuiteSha256": "c6008e01efbd313c8d338c9f3c7e02cbaa6a5facac059efbdfe19d0492ad538a",
     "toolWorkflowHarnessSha256": "df02c22f8fa8e6e9bef7aa2c03b7d302177d0c8b4250d4cdfb847f7b753818d0",
     "toolResilienceSuiteSha256": "119ca7dbeacbc82b35c409154293f5d4baf6af01664701969bfe9d9300fcc219",

@@ -3,7 +3,7 @@
 ## 日常命令
 
 ```bash
-cd /home/tiammomo/projects/infra/local-inference-stack
+cd "$PROJECT_ROOT"
 
 scripts/runtime.sh start
 scripts/runtime.sh status
@@ -27,7 +27,7 @@ scripts/runtime.sh profile latency
 ModelPort：
 
 ```bash
-cd /home/tiammomo/projects/dev/ModelPort
+cd "$MODELPORT_ROOT"
 docker compose ps
 docker compose logs --tail=200 -f modelport
 ```
@@ -100,7 +100,7 @@ WSL/Docker Desktop 重启后，单文件 bind mount 可能指向失效的内部�
 重新创建容器，不删除 volume：
 
 ```bash
-cd /home/tiammomo/projects/dev/ModelPort
+cd "$MODELPORT_ROOT"
 docker compose rm -sf modelport dashboard
 docker compose up -d modelport dashboard
 ```

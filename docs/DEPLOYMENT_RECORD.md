@@ -2,6 +2,19 @@
 
 更新时间：2026-07-19（Asia/Shanghai）
 
+## 可迁移首次部署基线
+
+- 新增机器可读 `catalog/models.json`，覆盖 2–32GB NVIDIA 显存的 7 个保守候选；
+  仅 RTX 5070 Ti / 9B Q5 / 128K 签名为当前主机已验证，其余保持估算。
+- 新增只读硬件规划、安全可续传下载、精确字节/SHA256 校验和本地 Profile 选择。
+- Compose 的模型目录、别名、上下文与 batch 参数改为 Catalog 物化，重建后仍保持
+  9B/Q5、128K 单 Slot、Q8_0 KV 和 loopback 契约。
+- 首次 `quick` 不再依赖 ModelPort 或密钥；`standard` 显式要求兼容 checkout。
+- systemd 改为当前 checkout 渲染模板，仓库不再包含用户家目录绝对路径。
+- 重建后 quick 通过；standard 通过精确 Token 284=284、ModelPort Provider、Tool Use
+  5/5、韧性 4/4 和合成质量 4/4。对应证据为
+  `20260719T095142Z-quick.json` 与 `20260719T095408Z-standard.json`。
+
 ## 主机
 
 | 项目 | 实际值 |
@@ -91,8 +104,8 @@
 
 ## 服务现状
 
-- 项目唯一根目录：`/home/tiammomo/projects/infra/local-inference-stack`；旧路径
-  `/home/tiammomo/projects/infra/models` 已在容器重建和标准验收通过后移除。
+- 生产验收时项目已迁至独立 `local-inference-stack` checkout；旧的 `models`
+  项目根入口已在容器重建和标准验收通过后移除。路径只作为历史事件，不是运行契约。
 - llama.cpp：`http://127.0.0.1:18080`，容器 `qwen35-9b-q5km`；原宿主机端口 `8080` 已释放。
 - ModelPort：`http://127.0.0.1:38082`，默认 provider 为 `local_qwen`。
 - Dashboard：`http://127.0.0.1:33002`。

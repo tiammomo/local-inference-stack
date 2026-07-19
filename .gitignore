@@ -1,7 +1,9 @@
 models/**/*.gguf
+models/**/*.part
 cache/
 logs/
 profiles/operations.secrets.env
+profiles/deployment.local.env
 *.local.env
 .env
 __pycache__/

@@ -17,7 +17,6 @@ MANIFEST_PATH = ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.js
 CONTRACT_PATH = ROOT_DIR / "contracts" / "local-qwen-provider-v1.json"
 CONTAINER_NAME = "qwen35-9b-q5km"
 MODELPORT_CONTAINER_NAME = "modelport-modelport-1"
-LEGACY_PATH = Path("/home/tiammomo/projects/infra/models")
 
 
 def sha256(path: Path) -> str:
@@ -79,7 +78,6 @@ def main() -> int:
     configuration = manifest["configuration"]
     expected_root = str(ROOT_DIR)
     state = container.get("State", {})
-    check("legacy path absent", LEGACY_PATH.exists() or LEGACY_PATH.is_symlink(), False)
     check("container running", state.get("Status"), "running")
     check("container healthy", state.get("Health", {}).get("Status"), "healthy")
     check("runtime health", health.get("status"), "ok")
@@ -204,6 +202,16 @@ def main() -> int:
         "acceptance suite SHA256",
         sha256(ROOT_DIR / "scripts" / "acceptance-suite.sh"),
         configuration["acceptanceSuiteSha256"],
+    )
+    check(
+        "model catalog SHA256",
+        sha256(ROOT_DIR / "catalog" / "models.json"),
+        configuration["modelCatalogSha256"],
+    )
+    check(
+        "model manager SHA256",
+        sha256(ROOT_DIR / "scripts" / "model-manager.py"),
+        configuration["modelManagerSha256"],
     )
     check(
         "Tool workflow suite SHA256",

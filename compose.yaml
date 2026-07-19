@@ -21,7 +21,7 @@ services:
       HOME: /cache
       CUDA_CACHE_PATH: /cache/cuda
     volumes:
-      - ./models/qwen3.5-9b:/models:ro
+      - ${QWEN_MODEL_DIR:-./models/qwen3.5-9b}:/models:ro
       - ${QWEN_CACHE_DIR:-./cache}:/cache
     ports:
       - "${QWEN_PUBLISH_ADDRESS:-127.0.0.1:18080}:8080"
@@ -34,7 +34,7 @@ services:
       - --model
       - /models/${QWEN_MODEL_FILE:-Qwen3.5-9B-Q5_K_M.gguf}
       - --alias
-      - qwen3.5-9b-q5km
+      - ${QWEN_SERVED_MODEL_ID:-qwen3.5-9b-q5km}
       - --no-mmproj
       - --host
       - 0.0.0.0
@@ -49,7 +49,7 @@ services:
       - --n-predict
       - ${QWEN_N_PREDICT:-32768}
       - --gpu-layers
-      - all
+      - ${QWEN_GPU_LAYERS:-all}
       - --flash-attn
       - on
       - --cache-type-k
@@ -57,13 +57,13 @@ services:
       - --cache-type-v
       - ${QWEN_CACHE_TYPE_V:-q8_0}
       - --batch-size
-      - "2048"
+      - ${QWEN_BATCH_SIZE:-2048}
       - --ubatch-size
-      - "1024"
+      - ${QWEN_UBATCH_SIZE:-1024}
       - --threads
-      - "8"
+      - ${QWEN_THREADS:-8}
       - --threads-batch
-      - "16"
+      - ${QWEN_THREADS_BATCH:-16}
       - --no-context-shift
       - --jinja
       - --reasoning

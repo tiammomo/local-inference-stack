@@ -2,12 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-/home/tiammomo/projects/dev/ModelPort}"
+MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-}"
 MODE="quick"
 RECORD="true"
 STARTED_AT="$(date --iso-8601=seconds)"
 STARTED_EPOCH="$(date +%s)"
 CURRENT_STEP="initialization"
+
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
+load_deployment_env "$ROOT_DIR"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,8 +54,12 @@ record_exit() {
   git_commit="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'uncommitted')"
   compose_sha="$(sha256sum "$ROOT_DIR/compose.yaml" | cut -d' ' -f1)"
   contract_sha="$(sha256sum "$ROOT_DIR/contracts/local-qwen-provider-v1.json" | cut -d' ' -f1)"
-  manifest_sha="$(sha256sum "$ROOT_DIR/deployments/qwen3.5-9b-rtx5070ti/manifest.json" | cut -d' ' -f1)"
-  image_ref="$(docker inspect qwen35-9b-q5km --format '{{.Config.Image}}' 2>/dev/null || printf 'unavailable')"
+  if [[ "$QWEN_CATALOG_ID" == "qwen35-9b-q5km" ]]; then
+    manifest_sha="$(sha256sum "$ROOT_DIR/deployments/qwen3.5-9b-rtx5070ti/manifest.json" | cut -d' ' -f1)"
+  else
+    manifest_sha="unvalidated-catalog-profile"
+  fi
+  image_ref="$(docker inspect "$QWEN_CONTAINER_NAME" --format '{{.Config.Image}}' 2>/dev/null || printf 'unavailable')"
   printf '{\n' >"$RECORD_BASE.json"
   printf '  "schemaVersion": 1,\n' >>"$RECORD_BASE.json"
   printf '  "mode": "%s",\n' "$MODE" >>"$RECORD_BASE.json"
@@ -63,6 +71,7 @@ record_exit() {
   printf '  "durationSeconds": %d,\n' "$duration" >>"$RECORD_BASE.json"
   printf '  "gitCommit": "%s",\n' "$git_commit" >>"$RECORD_BASE.json"
   printf '  "runtimeImage": "%s",\n' "$image_ref" >>"$RECORD_BASE.json"
+  printf '  "catalogModelId": "%s",\n' "$QWEN_CATALOG_ID" >>"$RECORD_BASE.json"
   printf '  "configuration": {\n' >>"$RECORD_BASE.json"
   printf '    "composeSha256": "%s",\n' "$compose_sha" >>"$RECORD_BASE.json"
   printf '    "contractSha256": "%s",\n' "$contract_sha" >>"$RECORD_BASE.json"
@@ -79,8 +88,8 @@ trap record_exit EXIT
 
 usage() {
   printf 'Usage: %s {quick|standard|full}\n' "$0"
-  printf '  quick     health, generation, reasoning, ModelPort, token count, dashboard\n'
-  printf '  standard  quick + artifacts, reasoning adapter, provider matrix, Tool Use\n'
+  printf '  quick     local tests, runtime health, generation, and reasoning\n'
+  printf '  standard  quick + ModelPort contract, token count, dashboard, Tool Use\n'
   printf '  full      standard + 118K/92K context and performance benchmarks\n'
 }
 
@@ -97,6 +106,19 @@ quick_suite() {
   run_step "Runtime status" "$ROOT_DIR/scripts/runtime.sh" status
   run_step "Direct generation" "$ROOT_DIR/scripts/smoke-test.sh"
   run_step "Direct reasoning" "$ROOT_DIR/scripts/reasoning-smoke.sh"
+}
+
+standard_suite() {
+  quick_suite
+  if [[ "$QWEN_CATALOG_ID" != "qwen35-9b-q5km" ]]; then
+    printf 'standard currently validates the versioned ModelPort contract for qwen35-9b-q5km; selected=%s\n' "$QWEN_CATALOG_ID" >&2
+    exit 2
+  fi
+  if [[ -z "$MODELPORT_DIR" || ! -x "$MODELPORT_DIR/scripts/provider-matrix.sh" ]]; then
+    printf 'standard requires MODELPORT_PROJECT_DIR pointing to a compatible ModelPort checkout.\n' >&2
+    exit 2
+  fi
+  run_step "Artifact integrity" "$ROOT_DIR/scripts/verify-models.sh" --active --cached
   run_step "ModelPort Messages" "$ROOT_DIR/scripts/modelport-smoke.sh"
   run_step "Exact token counting" "$ROOT_DIR/scripts/modelport-token-count-smoke.sh"
   run_step "ModelPort context admission" \
@@ -104,11 +126,6 @@ quick_suite() {
   run_step "Operations dashboard" \
     curl --noproxy '*' -fsS http://127.0.0.1:33004/api/health
   printf '\n'
-}
-
-standard_suite() {
-  quick_suite
-  run_step "Artifact integrity" "$ROOT_DIR/scripts/verify-models.sh" --full --cached
   run_step "ModelPort reasoning mapping" \
     "$ROOT_DIR/scripts/modelport-reasoning-smoke.sh"
   run_step "ModelPort provider matrix" \

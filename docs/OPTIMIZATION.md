@@ -257,7 +257,7 @@ RAM、正文完成率、Tool 协议通过率、闭环任务成功率和 118K 召
 ## 复验命令
 
 ```bash
-cd /home/tiammomo/projects/infra/local-inference-stack
+cd "$PROJECT_ROOT"
 
 scripts/smoke-test.sh
 scripts/reasoning-smoke.sh
@@ -266,7 +266,7 @@ scripts/modelport-reasoning-smoke.sh
 scripts/modelport-context-acceptance.sh
 DECODE_CONTEXT_TOKENS=92000 python3 scripts/decode-benchmark.py
 
-cd /home/tiammomo/projects/dev/ModelPort
+cd "$MODELPORT_ROOT"
 scripts/provider-matrix.sh --model qwen3.5-code
 scripts/tool-use-acceptance.sh --upstream --max-tokens 2048
 ```

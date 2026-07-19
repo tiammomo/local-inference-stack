@@ -1,0 +1,13 @@
+[Unit]
+Description=Privacy-preserving local inference and ModelPort operations report
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@PROJECT_ROOT@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
+ExecStart=@PROJECT_ROOT@/scripts/operations-report.sh --hours 24 --provider local_qwen --save --fail-on-alert
+Nice=10
+
+[Install]
+WantedBy=default.target

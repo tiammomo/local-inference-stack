@@ -1,130 +1,92 @@
 # 部署步骤
 
-## 固定制品
+通用首次部署入口见 [GETTING_STARTED.md](GETTING_STARTED.md)。本页记录运行时如何把
+Catalog 选择物化为 Compose 服务，以及当前 9B 基线的高级操作。
+
+## Catalog 驱动部署
+
+```bash
+./scripts/model-manager.py plan --json
+
+# 用户审阅并明确批准后：
+MODEL_ID=qwen35-9b-q5km
+./scripts/model-manager.py download --model "$MODEL_ID" --yes
+./scripts/model-manager.py select --model "$MODEL_ID" --yes
+./scripts/runtime.sh start latency
+./scripts/acceptance-suite.sh quick
+```
+
+`catalog/models.json` 是模型 URL、文件名、精确字节数、SHA256、硬件门槛和默认运行
+参数的唯一配置源。不要把网页中的“latest”链接或未经固定的下载脚本加到部署流程。
+
+## 运行物化
+
+`select` 生成本地 `profiles/deployment.local.env`：
+
+- 模型目录、文件和对外 model ID；
+- 容器名；
+- 上下文、最大生成、Prompt RAM Cache；
+- batch/ubatch。
+
+该文件权限为 `0600` 且被 Git 忽略。Compose 再叠加 `latency.env` 或
+`throughput.env`，后加载的部署 Profile 保留 Catalog 的安全容量参数。服务默认使用：
+
+- 固定 digest 的 llama.cpp CUDA server；
+- 全层 GPU offload、Flash Attention；
+- Q8_0 K/V Cache；
+- Jinja 与默认思考模式；
+- 只读根文件系统、非 root、无 Linux capabilities；
+- `127.0.0.1:18080` 诊断端口。
+
+启动会创建缺失的 `${MODELPORT_NETWORK_NAME:-modelport_default}` Docker 网络。该网络
+只是稳定的可选集成面；ModelPort 不再是本地模型启动的前置条件。
+
+## 当前验证制品
+
+RTX 5070 Ti 档案仍固定以下基线：
 
 | 制品 | 固定值 |
 | --- | --- |
-| 模型 | `unsloth/Qwen3.5-9B-GGUF` |
+| 模型仓库 | `unsloth/Qwen3.5-9B-GGUF` |
 | 权重 | `Qwen3.5-9B-Q5_K_M.gguf` |
 | 权重 SHA256 | `dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c` |
-| MTP A/B 制品 | `Qwen3.5-9B-MTP-Q5_K_M.gguf`，生产不加载 |
-| MTP 制品 SHA256 | `1732d6616554b102be9bc41684cd094f471e1b3067f5e5a89eb5a86a5a4f2a6c` |
-| 视觉投影器 | `mmproj-BF16.gguf`，基线不加载 |
-| 投影器 SHA256 | `853698ce7aa6c7ba732478bad280240969ddf7b0fcbf93900046f63903a83383` |
-| llama.cpp 镜像 | `ghcr.io/ggml-org/llama.cpp:server-cuda` |
-| OCI index digest | `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8` |
+| llama.cpp OCI digest | `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8` |
+| 运行时 | 128K、单 Slot、Q8_0 K/V、32K 最大生成、思考开启 |
 
-运行基线为 `ctx-size=131072`、`parallel=1`、Q8_0 K/V Cache、
-Flash Attention、全部模型层 GPU offload、`batch-size=2048`、
-`ubatch-size=1024`、8GiB 提示缓存和 `ngram-mod` 推测解码，并通过
-`--reasoning on` 默认开启思考。预算耗尽时会注入收束提示，服务端生成上限为
-32,768 tokens。
+MTP 和视觉投影器不参与文本基线，也不在通用 Catalog 中自动下载。历史 A/B 的固定
+制品与拒绝结论保留在 [OPTIMIZATION.md](OPTIMIZATION.md)；重新开启实验必须单独做
+来源、扫描、显存、性能和质量审查，不能借用首次部署命令。
 
-## 目录
+## systemd 用户服务
 
-```text
-infra/local-inference-stack/
-├── compose.yaml
-├── models/qwen3.5-9b/
-├── cache/
-├── logs/
-├── profiles/
-├── scripts/
-└── docs/
-```
-
-## 下载
+仓库保存可迁移模板，不保存任何用户绝对路径：
 
 ```bash
-cd /home/tiammomo/projects/infra/local-inference-stack
-
-curl -fL --retry 8 --retry-all-errors --continue-at - \
-  --output models/qwen3.5-9b/Qwen3.5-9B-Q5_K_M.gguf \
-  'https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q5_K_M.gguf?download=true'
-
-curl -fL --retry 8 --retry-all-errors --continue-at - \
-  --output models/qwen3.5-9b/mmproj-BF16.gguf \
-  'https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/mmproj-BF16.gguf?download=true'
-
-curl -fL --retry 8 --retry-all-errors --continue-at - \
-  --output models/qwen3.5-9b/Qwen3.5-9B-MTP-Q5_K_M.gguf \
-  'https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B-Q5_K_M.gguf?download=true'
-
-scripts/verify-models.sh
+./scripts/install-user-services.py --enable
 ```
 
-## 启动
-
-ModelPort 的 Compose 网络必须存在：
+运营台和日报属于可选 ModelPort 集成，需要先最小化复制本地凭证：
 
 ```bash
-docker network inspect modelport_default
-scripts/runtime.sh start
-scripts/runtime.sh status
+./scripts/provision-operations-secrets.py --source /path/to/ModelPort/.env
+./scripts/install-user-services.py --operations --enable
 ```
-
-启用登录/启动后的幂等恢复：
-
-```bash
-mkdir -p ~/.config/systemd/user
-ln -sf /home/tiammomo/projects/infra/local-inference-stack/deploy/systemd/qwen-model-runtime.service \
-  ~/.config/systemd/user/qwen-model-runtime.service
-systemctl --user daemon-reload
-systemctl --user enable --now qwen-model-runtime.service
-```
-
-等 `/health` 返回 `{"status":"ok"}` 后执行：
-
-```bash
-scripts/smoke-test.sh
-```
-
-`/props` 的 `default_generation_settings.n_ctx` 和 `/slots` 的 `n_ctx`
-都必须为 `131072`。
 
 ## ModelPort 上线
 
-`/home/tiammomo/projects/dev/ModelPort/.env` 只保存部署环境值：
+当前版本化契约只验证 `qwen35-9b-q5km`。ModelPort 环境中的稳定上游为：
 
 ```env
 MODELPORT_DEFAULT_PROVIDER=local_qwen
 QWEN_LOCAL_BASE_URL=http://qwen-runtime:8080/v1
 ```
 
-provider 展示名、模型 ID、Tool Use 能力和内部费率卡
-`local-qwen-2026q3-v1` 在 ModelPort 的 `config.toml` 中声明；模型运行参数仍只在
-本目录的 `compose.yaml` 中声明。具体费率与职责边界见 `docs/MODELPORT.md`。
-
-默认启动单 Slot 128K：
+应用使用 ModelPort Anthropic Messages API，ModelPort 使用 OpenAI-compatible 上游。
+切换 Catalog 模型前必须协调模型 ID、上下文、Token 准入和能力契约。测试命令：
 
 ```bash
-scripts/runtime.sh start latency
+MODELPORT_PROJECT_DIR=/path/to/ModelPort ./scripts/acceptance-suite.sh standard
 ```
 
-需要两路 Agent 聚合吞吐时可切换双 Slot，每 Slot 64K；该模式不适合 92K/118K
-验收，使用完恢复默认：
-
-```bash
-scripts/runtime.sh profile throughput
-scripts/runtime.sh profile latency
-```
-
-重新创建服务，确保 Docker Desktop 不复用失效的 WSL bind mount：
-
-```bash
-cd /home/tiammomo/projects/dev/ModelPort
-docker compose rm -sf modelport dashboard
-docker compose up -d --build modelport dashboard
-docker compose ps
-```
-
-然后回到模型目录运行端到端测试：
-
-```bash
-cd /home/tiammomo/projects/infra/local-inference-stack
-scripts/modelport-smoke.sh
-```
-
-升级镜像或运行参数时先使用 `scripts/release-candidate.sh quick` 在独立 `18081` 端口
-串行验收，不能直接覆盖生产实例。128K 运行时已启用本地 KV 快照目录，但不会自动
-保存或恢复真实会话；边界见 `CACHE.md`。
+升级镜像、权重或关键运行参数时仍应通过独立候选端口与回滚流程，不能直接覆盖已经
+验证的生产实例。细节见 [QUALITY_AND_RELEASE.md](QUALITY_AND_RELEASE.md)。

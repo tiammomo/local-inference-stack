@@ -1,11 +1,15 @@
 # Local Inference Stack 文档
 
-本目录是本地模型推理与运营栈的唯一规划与运维文档入口。当前生效部署档案是
-Qwen3.5-9B Q5_K_M / RTX 5070 Ti / 128K。
+本目录是本地模型推理与运营栈的规划与运维文档入口。首次部署先走硬件探测和
+Catalog 推荐；当前唯一实机验证档案是 Qwen3.5-9B Q5_K_M / RTX 5070 Ti / 128K。
 
 ## 文档导航
 
 - [PROJECT.md](PROJECT.md)：项目定位、分层边界、命名与演进路线。
+- [GETTING_STARTED.md](GETTING_STARTED.md)：Agent 可执行的首次部署闭环。
+- [HARDWARE_GUIDE.md](HARDWARE_GUIDE.md)：跨显存/RAM 档位的模型选择和证据边界。
+- [SECURITY_AND_RELEASE.md](SECURITY_AND_RELEASE.md)：供应链、安全与 GitHub 发布清单。
+- [模型 Catalog](../catalog/models.json)：推荐、制品、哈希与运行参数的唯一数据源。
 - [当前部署档案](../deployments/qwen3.5-9b-rtx5070ti/README.md)：Qwen3.5-9B / RTX 5070 Ti / 128K 身份与机器可读基线。
 - [Provider 契约](../contracts/local-qwen-provider-v1.json)：本项目与 ModelPort 的版本化能力边界。
 - [ARCHITECTURE.md](ARCHITECTURE.md)：目标、边界、架构和容量设计。

@@ -293,6 +293,8 @@ function renderModel() {
   const runtime = qwen.runtime || {}
   const healthy = status.health.qwenHealthy && status.health.modelportReady
   setText('model-name', baseline.displayName)
+  setText('active-deployment-label', `${baseline.displayName.toUpperCase()} / ACTIVE DEPLOYMENT`)
+  document.title = `Local Inference Stack · ${baseline.displayName}`
   setText('model-alias', runtime.modelAlias || baseline.deploymentName)
   setText('model-type', `${baseline.quantization} · ${runtime.modelType || 'GGUF'}`)
   setText('context-value', `${number((runtime.contextSize || baseline.contextTokens) / 1024, 0)}K`)
@@ -306,10 +308,12 @@ function renderModel() {
   const updatedAt = state.live?.generatedAtEpochMs || status.generatedAtEpochMs
   setText('last-updated', `实时 ${new Date(updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}`)
 
+  const slotCount = Array.isArray(qwen.slots) && qwen.slots.length ? qwen.slots.length : 1
+  const perSlot = (runtime.contextSize || baseline.contextTokens) / slotCount
   const specs = [
     ['KV Cache', baseline.kvCache],
     ['思考模式', baseline.reasoningDefault ? '默认开启' : '默认关闭'],
-    ['运行档位', baseline.profile],
+    ['运行档位', `${slotCount} × ${number(perSlot / 1024, 0)}K Slot`],
     ['Tool Use', 'Strict response'],
   ]
   $('model-specs').innerHTML = specs.map(([label, value], index) =>
@@ -476,7 +480,7 @@ function renderServices() {
   const status = state.status
   const containers = status.process.containers || []
   const fallback = [
-    { name: 'qwen35-9b-q5km', status: status.health.qwenHealthy ? 'running' : 'down', healthy: status.health.qwenHealthy ? 'healthy' : 'unhealthy' },
+    { name: state.baseline.deploymentName, status: status.health.qwenHealthy ? 'running' : 'down', healthy: status.health.qwenHealthy ? 'healthy' : 'unhealthy' },
     { name: 'modelport-modelport-1', status: status.health.modelportReady ? 'running' : 'down', healthy: status.health.modelportReady ? 'healthy' : 'unhealthy' },
     { name: 'modelport-dashboard-1', status: 'unknown', healthy: 'unknown' },
   ]

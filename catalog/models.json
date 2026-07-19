@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-19",
+  "scope": "Curated NVIDIA CUDA / llama.cpp text deployments; estimates are conservative starting points, not benchmarks.",
+  "artifactPolicy": {
+    "modelAuthor": "Qwen",
+    "artifactPublisher": "unsloth",
+    "trust": "Every downloadable artifact is pinned by filename, byte size, and SHA256. URLs and hashes must be reviewed together.",
+    "licenseReviewRequired": true
+  },
+  "defaultModel": "qwen35-9b-q5km",
+  "models": [
+    {
+      "id": "qwen35-0.8b-q5km",
+      "displayName": "Qwen3.5-0.8B Q5_K_M",
+      "quantization": "Q5_K_M",
+      "status": "estimated",
+      "purpose": "Small CUDA smoke tests and constrained hosts",
+      "artifactRepository": "unsloth/Qwen3.5-0.8B-GGUF",
+      "modelDirectory": "qwen3.5-0.8b-q5km",
+      "servedModelId": "qwen3.5-0.8b-q5km",
+      "requirements": {"minVramGiB": 2, "recommendedVramGiB": 4, "minRamGiB": 8, "minFreeDiskGiB": 2},
+      "runtime": {"contextTokens": 32768, "recommendedInputTokens": 22528, "maxOutputTokens": 8192, "cacheRamMiB": 2048, "batchSize": 1024, "ubatchSize": 512},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-0.8B-Q5_K_M.gguf",
+          "bytes": 590057728,
+          "sha256": "c3ef5827b322c4be08a3a26ce424460d8b37daf593356c2cc1f4e40a7ab0581b",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q5_K_M.gguf?download=true"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-2b-q5km",
+      "displayName": "Qwen3.5-2B Q5_K_M",
+      "quantization": "Q5_K_M",
+      "status": "estimated",
+      "purpose": "Lightweight assistants and low-latency utility tasks",
+      "artifactRepository": "unsloth/Qwen3.5-2B-GGUF",
+      "modelDirectory": "qwen3.5-2b-q5km",
+      "servedModelId": "qwen3.5-2b-q5km",
+      "requirements": {"minVramGiB": 4, "recommendedVramGiB": 6, "minRamGiB": 12, "minFreeDiskGiB": 3},
+      "runtime": {"contextTokens": 32768, "recommendedInputTokens": 22528, "maxOutputTokens": 8192, "cacheRamMiB": 2048, "batchSize": 1024, "ubatchSize": 512},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-2B-Q5_K_M.gguf",
+          "bytes": 1435238656,
+          "sha256": "1885b3a9195f8cc09da9a7a7a75afdc1e8d5cbf9fc4a499c3961dddea37098ac",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q5_K_M.gguf?download=true"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-4b-q5km",
+      "displayName": "Qwen3.5-4B Q5_K_M",
+      "quantization": "Q5_K_M",
+      "status": "estimated",
+      "purpose": "Balanced small-host coding and agent tasks",
+      "artifactRepository": "unsloth/Qwen3.5-4B-GGUF",
+      "modelDirectory": "qwen3.5-4b-q5km",
+      "servedModelId": "qwen3.5-4b-q5km",
+      "requirements": {"minVramGiB": 6, "recommendedVramGiB": 8, "minRamGiB": 16, "minFreeDiskGiB": 5},
+      "runtime": {"contextTokens": 65536, "recommendedInputTokens": 45056, "maxOutputTokens": 16384, "cacheRamMiB": 4096, "batchSize": 1536, "ubatchSize": 768},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-4B-Q5_K_M.gguf",
+          "bytes": 3143656608,
+          "sha256": "8814232b85594dcd46c50e5b8b29324a7efe9e746edbe8a3d1df3d3fce7aad39",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q5_K_M.gguf?download=true"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-9b-q4km",
+      "displayName": "Qwen3.5-9B Q4_K_M",
+      "quantization": "Q4_K_M",
+      "status": "estimated",
+      "purpose": "9B capability on 12 GB-class GPUs",
+      "artifactRepository": "unsloth/Qwen3.5-9B-GGUF",
+      "modelDirectory": "qwen3.5-9b-q4km",
+      "servedModelId": "qwen3.5-9b-q4km",
+      "requirements": {"minVramGiB": 10, "recommendedVramGiB": 12, "minRamGiB": 24, "minFreeDiskGiB": 8},
+      "runtime": {"contextTokens": 65536, "recommendedInputTokens": 45056, "maxOutputTokens": 16384, "cacheRamMiB": 4096, "batchSize": 1536, "ubatchSize": 768},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-9B-Q4_K_M.gguf",
+          "bytes": 5680522464,
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-9b-q5km",
+      "displayName": "Qwen3.5-9B Q5_K_M",
+      "quantization": "Q5_K_M",
+      "status": "validated",
+      "validation": "RTX 5070 Ti 16 GB, 96 GB host RAM, 128K single slot, Q8_0 KV; see deployments/qwen3.5-9b-rtx5070ti/.",
+      "validatedHardware": {"gpuName": "NVIDIA GeForce RTX 5070 Ti", "gpuCount": 1, "minVramGiB": 15.5, "minRamGiB": 64},
+      "purpose": "Default local coding, reasoning, and Tool Use deployment",
+      "artifactRepository": "unsloth/Qwen3.5-9B-GGUF",
+      "modelDirectory": "qwen3.5-9b",
+      "servedModelId": "qwen3.5-9b-q5km",
+      "requirements": {"minVramGiB": 14, "recommendedVramGiB": 16, "minRamGiB": 32, "minFreeDiskGiB": 9},
+      "runtime": {"contextTokens": 131072, "recommendedInputTokens": 94208, "maxOutputTokens": 32768, "cacheRamMiB": 8192, "batchSize": 2048, "ubatchSize": 1024},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-9B-Q5_K_M.gguf",
+          "bytes": 6577841376,
+          "sha256": "dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q5_K_M.gguf?download=true"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-27b-q4km",
+      "displayName": "Qwen3.5-27B Q4_K_M",
+      "quantization": "Q4_K_M",
+      "status": "estimated",
+      "purpose": "Higher-quality single-GPU deployment on 24 GB-class GPUs",
+      "artifactRepository": "unsloth/Qwen3.5-27B-GGUF",
+      "modelDirectory": "qwen3.5-27b-q4km",
+      "servedModelId": "qwen3.5-27b-q4km",
+      "requirements": {"minVramGiB": 22, "recommendedVramGiB": 24, "minRamGiB": 48, "minFreeDiskGiB": 20},
+      "runtime": {"contextTokens": 32768, "recommendedInputTokens": 22528, "maxOutputTokens": 8192, "cacheRamMiB": 8192, "batchSize": 1024, "ubatchSize": 512},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-27B-Q4_K_M.gguf",
+          "bytes": 16740812704,
+          "sha256": "84b5f7f112156d63836a01a69dc3f11a6ba63b10a23b8ca7a7efaf52d5a2d806",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-Q4_K_M.gguf?download=true"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-35b-a3b-q4km",
+      "displayName": "Qwen3.5-35B-A3B Q4_K_M",
+      "quantization": "Q4_K_M",
+      "status": "estimated",
+      "purpose": "MoE deployment for 32 GB+ GPU or reviewed multi-GPU hosts",
+      "artifactRepository": "unsloth/Qwen3.5-35B-A3B-GGUF",
+      "modelDirectory": "qwen3.5-35b-a3b-q4km",
+      "servedModelId": "qwen3.5-35b-a3b-q4km",
+      "requirements": {"minVramGiB": 28, "recommendedVramGiB": 32, "minRamGiB": 64, "minFreeDiskGiB": 25},
+      "runtime": {"contextTokens": 32768, "recommendedInputTokens": 22528, "maxOutputTokens": 8192, "cacheRamMiB": 8192, "batchSize": 1024, "ubatchSize": 512},
+      "artifacts": [
+        {
+          "role": "model",
+          "required": true,
+          "filename": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+          "bytes": 22016023168,
+          "sha256": "3b46d1066bc91cc2d613e3bc22ce691dd77e6f0d33c9060690d24ce6de494375",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-Q4_K_M.gguf?download=true"
+        }
+      ]
+    }
+  ]
+}

@@ -493,7 +493,11 @@ def host_snapshot() -> dict[str, Any] | None:
 
 
 def container_snapshot() -> list[dict[str, Any]]:
-    names = ["qwen35-9b-q5km", "modelport-modelport-1", "modelport-dashboard-1"]
+    names = [
+        os.environ.get("QWEN_CONTAINER_NAME", "qwen35-9b-q5km"),
+        "modelport-modelport-1",
+        "modelport-dashboard-1",
+    ]
     try:
         result = subprocess.run(
             ["docker", "inspect", *names],

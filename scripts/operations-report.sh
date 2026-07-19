@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-/home/tiammomo/projects/dev/ModelPort}"
 MODELPORT_ENV_FILE="${MODELPORT_OPERATIONS_ENV_FILE:-$ROOT_DIR/profiles/operations.secrets.env}"
 OPERATIONS_PROFILE_FILE="${OPERATIONS_PROFILE_FILE:-$ROOT_DIR/profiles/operations.env}"
 

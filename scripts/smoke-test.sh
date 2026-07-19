@@ -2,6 +2,10 @@
 set -euo pipefail
 
 BASE_URL="${LLAMA_BASE_URL:-http://127.0.0.1:18080}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
+load_deployment_env "$ROOT_DIR"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
 
@@ -12,12 +16,14 @@ printf '\n'
 
 curl --noproxy '*' -fsS "$BASE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen3.5-9b-q5km",
-    "messages": [{"role": "user", "content": "只回复：本地 Qwen3.5 部署成功"}],
-    "max_tokens": 512,
-    "temperature": 0
-  }' > "$BODY_FILE"
+  --data-binary @- > "$BODY_FILE" <<JSON
+{
+  "model": "$QWEN_SERVED_MODEL_ID",
+  "messages": [{"role": "user", "content": "只回复：本地 Qwen3.5 部署成功"}],
+  "max_tokens": 512,
+  "temperature": 0
+}
+JSON
 
 python3 - "$BODY_FILE" <<'PY'
 import json

@@ -47,7 +47,7 @@ systemctl --user restart qwen-model-operations-dashboard.service
 生成文件权限固定为 `0600` 并被 Git 忽略。
 
 ```bash
-cd /home/tiammomo/projects/infra/local-inference-stack
+cd "$PROJECT_ROOT"
 
 # 输出到终端
 scripts/operations-report.sh --hours 24
