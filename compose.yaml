@@ -7,6 +7,11 @@ services:
     user: "${QWEN_RUNTIME_UID:-1000}:${QWEN_RUNTIME_GID:-1000}"
     init: true
     restart: ${QWEN_RESTART_POLICY:-unless-stopped}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${QWEN_LOG_MAX_SIZE:-20m}
+        max-file: "${QWEN_LOG_MAX_FILES:-5}"
     gpus: all
     read_only: true
     cap_drop:

@@ -34,8 +34,8 @@
 | --- | --- |
 | llama.cpp OCI digest | `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8` |
 | llama.cpp build | `10015`，commit `12127defd` |
-| ModelPort 源码 | commit `4efaf4a`，本地 `main`，待推送 |
-| ModelPort 本地镜像 ID | `sha256:9109473065ef6a0923abce0af5d2ea927ab8f167dc578e4d266d2009059f2ad0` |
+| ModelPort 源码 | commit `078257e`，本地 `main`，待推送 |
+| ModelPort 本地镜像 ID | `sha256:7048693ad157cea154b84b8d36dee2ce212a39ab432aef9441e7903cf7027628` |
 | Dashboard 本地镜像 ID | `sha256:99cb2838e274b4042a3b7fbe4842ad0370b8a83ec5a767eb70df44c343f1b850` |
 | Q5_K_M SHA256 | `dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c` |
 | MTP Q5_K_M SHA256 | `1732d6616554b102be9bc41684cd094f471e1b3067f5e5a89eb5a86a5a4f2a6c`，仅保留用于 A/B |
@@ -73,7 +73,13 @@
 | ModelPort 精确 Token 计数 | 通过 | 中文 system、混合消息和 Tool Schema：直连与逻辑别名均为 282；关闭思考模板均为 15 |
 | ModelPort 上下文准入 | 通过 | `15 + 131072 > 131072` 在占用 Slot 前返回 400；错误含精确数值和“不静默截断”保证；思考输入建议上限 94,208 |
 | 跨仓库配置契约 | 通过 | 24/24；Provider、模型别名、默认思考、预算、Tool Use 和 Token/上下文限制一致 |
-| 部署漂移检查 | 通过 | 55/55；包含 ModelPort commit、clean OCI source-state、镜像 ID、容器加固、配置哈希和模型完整性 |
+| 部署漂移检查 | 通过 | 86/86；增加 Qwen/ModelPort/PostgreSQL/Dashboard 日志轮转、生产 systemd 单元、备份新鲜度/权限和运营脚本哈希 |
+| 完整单机备份 | 通过 | 每日 PostgreSQL custom dump + `.env`/`config.toml` + SHA256/provenance；目录 `0700`、归档 `0600`、保留 14 天 |
+| 隔离恢复演练 | 通过 | systemd 沙箱内把最新 dump 恢复到无宿主端口的临时 PostgreSQL，`auth`/`control` 齐全，生产库无停机/写入 |
+| Docker 日志轮转 | 通过 | Qwen 20MiB × 5；ModelPort、PostgreSQL、Dashboard 分别 10MiB × 5；live inspect 与清单一致 |
+| 单机生产 Timer | 通过 | 日报每日 02:15、备份每日 03:15、恢复演练每周日 04:15，均 enabled/active、Persistent |
+| 主机与备份告警 | 通过 | 实时报告覆盖磁盘 10%/20GiB、备份缺失/36h 过期/权限和 systemd 失败标记；当前 0 告警 |
+| 连续稳定性门禁 | 收集中 | `soak-check.py` 要求连续 uptime、零重启、日报覆盖、无告警、新鲜备份和 84/84 部署清单；本次 recreate 后重新计时 |
 | 合成质量门禁 | 通过 | 10 个 Case × 3 次，共 30/30；覆盖推理、指令、抽取、JSON、代码、多语言和 Tool Use |
 | Tool Use 结果观测 | 通过 | 请求级区分 `tool_called/final_answer/answered_without_tool/completed_unobserved` 与错误终态；不保留工具内容 |
 | 持久化错误脱敏 | 通过 | usage、request/attempt ledger、Provider/credential health 只保留错误类别；迁移 4 已重写 25 条 request、22 条 attempt 与 96 条 usage 历史错误，Schema 路径和高置信度 token 痕迹均为 0 |
@@ -103,6 +109,7 @@
 | 2026-07-19 Tool Reliability standard | 通过 | `logs/acceptance/20260719T063149Z-standard.json`；基础闭环 5/5、韧性 4/4、质量 4/4，最终 ModelPort 镜像健康 |
 | 2026-07-19 安全复验 standard | 通过 | `logs/acceptance/20260719T070612Z-standard.json`；安全镜像重建后基础链路、Reasoning、Token、准入、Tool Use、闭环 5/5、韧性 4/4、质量 4/4 全通过 |
 | 2026-07-19 自适应档位与契约复验 | 通过 | `logs/acceptance/20260719T113410Z-standard.json`；精确 Token 282=282、契约 24/24、Tool 闭环 5/5、韧性 4/4、质量 4/4；92K 思考召回另行通过 |
+| 2026-07-19 单机生产闭环复验 | 通过 | `logs/acceptance/20260719T133357Z-standard.json`；Dashboard 完整状态含新鲜备份、磁盘 81.65%、0 告警；契约 24/24、精确 Token 282=282、Tool 闭环 5/5、韧性 4/4、质量 4/4 |
 
 ## 服务现状
 

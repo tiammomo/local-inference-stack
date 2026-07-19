@@ -92,8 +92,13 @@ MODEL_ID=qwen35-9b-q5km
 
 ```bash
 ./scripts/provision-operations-secrets.py --source /path/to/ModelPort/.env
+cp profiles/backup.local.env.example profiles/backup.local.env
+# 编辑 MODELPORT_PROJECT_DIR=/path/to/ModelPort
 ./scripts/install-user-services.py --operations --enable
 ```
+
+`--operations` 同时启用每日完整备份、每周隔离恢复演练和失败标记。详细的数据边界、
+保留策略和 72 小时/7 天门禁见[单机生产运行](SINGLE_HOST_PRODUCTION.md)。
 
 ModelPort 协议验收只适用于当前版本化的 9B Provider 契约：
 

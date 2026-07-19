@@ -30,6 +30,12 @@ const labels = {
   upstream_transport: '上游传输',
   other: '其他',
   qwen_unhealthy: 'Qwen 服务不可用',
+  modelport_not_ready: 'ModelPort 未就绪',
+  host_disk_low: '主机磁盘余量不足',
+  modelport_backup_missing: 'ModelPort 尚无可用备份',
+  modelport_backup_stale: 'ModelPort 备份已过期',
+  modelport_backup_permissions: 'ModelPort 备份权限过宽',
+  systemd_service_failure: '单机生产服务执行失败',
   failure_rate: '调用失败率超过阈值',
   tool_failure_rate: 'Tool Use 失败率超过阈值',
   p95_latency_ms: 'P95 延迟超过阈值',
@@ -118,6 +124,14 @@ function uptime(seconds) {
   if (days) return `${days}d ${hours}h`
   if (hours) return `${hours}h ${minutes}m`
   return `${minutes}m`
+}
+
+function ageHours(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '无可用备份'
+  if (numeric < 1) return `${Math.max(1, Math.round(numeric * 60))} 分钟前`
+  if (numeric < 48) return `${numeric.toFixed(numeric < 10 ? 1 : 0)} 小时前`
+  return `${(numeric / 24).toFixed(1)} 天前`
 }
 
 function clamp(value, minimum = 0, maximum = 100) {
@@ -571,6 +585,8 @@ function renderHost() {
   setText('host-memory', `${bytes(host.memoryUsedBytes)} / ${bytes(host.memoryTotalBytes)}`)
   setText('host-available', bytes(host.memoryAvailableBytes))
   setText('swap-used', `${bytes(host.swapUsedBytes)} / ${bytes(host.swapTotalBytes)}`)
+  setText('disk-available', `${bytes(host.diskFreeBytes)} · ${number(host.diskFreePercent, 1)}%`)
+  setText('backup-age', ageHours(state.status.health?.backups?.latestAgeHours))
   setText('load-one', number(host.loadAverage?.[0], 2))
   setText('load-fifteen', number(host.loadAverage?.[2], 2))
   $('host-memory-fill').style.width = `${clamp(usedPercent)}%`

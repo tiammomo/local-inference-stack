@@ -18,6 +18,11 @@ UNIT_NAMES = (
     "qwen-model-operations-dashboard.service",
     "qwen-model-operations-report.service",
     "qwen-model-operations-report.timer",
+    "qwen-model-backup.service",
+    "qwen-model-backup.timer",
+    "qwen-model-restore-drill.service",
+    "qwen-model-restore-drill.timer",
+    "qwen-model-production-alert@.service",
 )
 
 
@@ -48,7 +53,20 @@ def render(name: str) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.operations and args.enable:
+        required_profiles = (
+            ROOT_DIR / "profiles" / "operations.secrets.env",
+            ROOT_DIR / "profiles" / "backup.local.env",
+        )
+        missing = [str(path) for path in required_profiles if not path.is_file()]
+        if missing:
+            raise SystemExit(
+                "cannot enable production operations units; create these ignored local profiles first:\n"
+                + "\n".join(f"- {path}" for path in missing)
+            )
     TARGET_DIR.mkdir(parents=True, exist_ok=True)
+    (ROOT_DIR / "backups").mkdir(mode=0o700, parents=True, exist_ok=True)
+    (ROOT_DIR / "logs" / "alerts").mkdir(mode=0o700, parents=True, exist_ok=True)
     selected = UNIT_NAMES if args.operations else UNIT_NAMES[:1]
     for name in selected:
         render(name)
@@ -57,7 +75,12 @@ def main() -> int:
         units = ["qwen-model-runtime.service"]
         if args.operations:
             units.extend(
-                ["qwen-model-operations-dashboard.service", "qwen-model-operations-report.timer"]
+                [
+                    "qwen-model-operations-dashboard.service",
+                    "qwen-model-operations-report.timer",
+                    "qwen-model-backup.timer",
+                    "qwen-model-restore-drill.timer",
+                ]
             )
         subprocess.run(["systemctl", "--user", "enable", "--now", *units], check=True)
     return 0

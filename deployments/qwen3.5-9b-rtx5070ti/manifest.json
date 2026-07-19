@@ -21,14 +21,24 @@
     "reasoningDefault": true,
     "recommendedReasoningInputTokens": 94208,
     "maxOutputTokens": 32768,
-    "slotSavePath": "/cache/slots"
+    "slotSavePath": "/cache/slots",
+    "logging": {
+      "driver": "json-file",
+      "maxSize": "20m",
+      "maxFiles": 5
+    }
   },
   "gateway": {
-    "sourceCommit": "4efaf4a29edaabbfa26fba5fcdeae0915ef17ac5",
+    "sourceCommit": "078257e5a2c480bb8c98765d456ff46ef186b62e",
     "sourceState": "clean",
     "containerImage": "modelport:local",
-    "containerImageId": "sha256:9109473065ef6a0923abce0af5d2ea927ab8f167dc578e4d266d2009059f2ad0",
-    "containerName": "modelport-modelport-1"
+    "containerImageId": "sha256:7048693ad157cea154b84b8d36dee2ce212a39ab432aef9441e7903cf7027628",
+    "containerName": "modelport-modelport-1",
+    "logging": {
+      "driver": "json-file",
+      "maxSize": "10m",
+      "maxFiles": 5
+    }
   },
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5070 Ti",
@@ -54,20 +64,38 @@
     "default": "latency",
     "available": ["latency", "throughput"]
   },
+  "operations": {
+    "backupDirectory": "backups/modelport",
+    "backupMaxAgeHours": 36,
+    "enabledUnits": [
+      "qwen-model-operations-dashboard.service",
+      "qwen-model-operations-report.timer",
+      "qwen-model-backup.timer",
+      "qwen-model-restore-drill.timer"
+    ]
+  },
   "configuration": {
-    "composeSha256": "db14fefef6b18804271861fc79e286b2e13fde40327059f494a23479ff494b3d",
+    "composeSha256": "34385fce3bd22b22dceb1a4c6a9b157f777e00c723276192631d861a532948aa",
     "latencyProfileSha256": "d062afdafe4106735a7b9d3cb32122532688a74d9ac0eba8009413a90dbeb200",
     "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
     "providerContractSha256": "b20737ece26cc9bc0958ebc5282c56c4208830e5e3f90b8472e48ed08d40d295",
     "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
-    "acceptanceSuiteSha256": "8a36f0e22adacc159ae6dac861352a04e4eb0a23ff43fac354b36e36421b9291",
+    "acceptanceSuiteSha256": "20387bc07b7d72894279910f548d2a1aac5d48928a42dcd55e505b2bcad000a2",
     "compatibilityCheckSha256": "818426008e62a73a51198da5ba6c635819ba9de0b6b8a1e0e671f9f353872148",
     "modelCatalogSha256": "6c8b35888983a844e80dcf9b7c4765cb74564da00bbf54a94e62a32d926e8ed8",
     "modelManagerSha256": "a610f7c4b0cb6cc639a715f924a7a0d0f35b8ee36e891aa1aebba59279da32be",
     "toolWorkflowSuiteSha256": "c6008e01efbd313c8d338c9f3c7e02cbaa6a5facac059efbdfe19d0492ad538a",
     "toolWorkflowHarnessSha256": "df02c22f8fa8e6e9bef7aa2c03b7d302177d0c8b4250d4cdfb847f7b753818d0",
     "toolResilienceSuiteSha256": "119ca7dbeacbc82b35c409154293f5d4baf6af01664701969bfe9d9300fcc219",
-    "dashboardBaselineSha256": "b933aa341058cba31a5b40fe4a7ed4a203436d6023b7fbe4de985a55053fe5f1"
+    "dashboardBaselineSha256": "b933aa341058cba31a5b40fe4a7ed4a203436d6023b7fbe4de985a55053fe5f1",
+    "dashboardApplicationSha256": "07f57312e8ce1437fce75764db8926187edd0f67e35ba2356f0bacb04ea95ad4",
+    "dashboardDocumentSha256": "18e3492ae7ea98b39a69262acd643968d9bbd9de90f7338c93e0f9beef332a45",
+    "dashboardServerSha256": "3818ea4d5bfda5808110129502587b262de7391b7ea7bbca5ad4a59aebe90651",
+    "dashboardSmokeSha256": "2baf0ab44403989b00d844707428d82d94c272c176727e4dfbd1743c80bfa7e6",
+    "operationsReportSha256": "82c0b3ddd6638b35064324edac2256c72ba430e955f140ab5d69face4ad90e73",
+    "backupOrchestratorSha256": "c0c342b6908fb92e35c3813db2e724c550cee96a6664241acaae0bcc986510ae",
+    "soakCheckSha256": "9f4d6bbaa4362e3ab5f4ace4cd6ee673b86a4a533c17f2faf7420214f786d148",
+    "systemdInstallerSha256": "14f445e639ca050bee245cf4d6c01ab2d77be63844d7abb00346fb72c4426ad5"
   },
   "quality": {
     "suite": "quality/cases.json",

@@ -2,8 +2,11 @@ models/**/*.gguf
 models/**/*.part
 cache/
 logs/
+backups/
 profiles/operations.secrets.env
 profiles/deployment.local.env
+profiles/backup.local.env
+profiles/alerting.local.env
 *.local.env
 .env
 __pycache__/

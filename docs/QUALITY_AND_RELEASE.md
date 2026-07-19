@@ -83,3 +83,8 @@ scripts/release-candidate.sh long
 
 由于模型文件不进入 Git，回滚要求原 GGUF 仍在 `models/` 且 SHA256 匹配；删除旧
 制品前必须先完成一次回滚演练。
+
+发布后的连续稳定性不是候选验收的一部分。单机生产使用
+`scripts/soak-check.py --minimum-hours 72` 作为灰度晋级门禁，使用 168 小时作为稳定
+基线；任何生产容器 recreate 都会重新开始 uptime 证据窗口。具体规则见
+[单机生产运行](SINGLE_HOST_PRODUCTION.md)。

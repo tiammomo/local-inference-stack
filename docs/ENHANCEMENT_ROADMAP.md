@@ -1,6 +1,6 @@
 # 推理与 Tool Use 增强路线图
 
-状态：P0 第二批已实现并进入验收；剩余重点转向连续稳定性、推理验证器升级与上下文治理。
+状态：单机生产 P0 已实现，连续证据收集中；剩余重点转向推理验证器升级与上下文治理。
 
 审查基线：2026-07-19，Qwen3.5-9B Q5_K_M、128K 单 Slot、Q8_0 K/V、llama.cpp、
 ModelPort Anthropic Messages 入口。
@@ -24,6 +24,10 @@ ModelPort Anthropic Messages 入口。
 约 32KB 大结果门禁。第三批补充了跨仓库契约检查、fast/code/deep 默认思考策略和
 ModelPort 双并行/交错参数协议验收。尚未完成：Reasoning/正文 Token 拆分、应用侧
 验证器驱动升级、真实模型并行闭环和客户端放弃/过期状态。
+
+单机生产闭环已补充每日完整 PostgreSQL/配置备份、每周隔离恢复演练、Docker 日志
+轮转、磁盘/备份/systemd 告警和 72/168 小时连续稳定性门禁。功能链路已实测通过；
+连续 uptime 必须从最终容器 recreate 后重新累计，不能用历史测试次数替代。
 
 ## 目标
 

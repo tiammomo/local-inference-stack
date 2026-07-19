@@ -275,6 +275,15 @@ class DashboardState:
             p95_latency_ms_warn=int(
                 os.environ.get("OPERATIONS_P95_LATENCY_MS_WARN", "180000")
             ),
+            disk_free_percent_warn=float(
+                os.environ.get("OPERATIONS_DISK_FREE_PERCENT_WARN", "10")
+            ),
+            disk_free_bytes_warn=int(
+                os.environ.get("OPERATIONS_DISK_FREE_BYTES_WARN", str(20 * 1024**3))
+            ),
+            backup_max_age_hours=float(
+                os.environ.get("OPERATIONS_BACKUP_MAX_AGE_HOURS", "36")
+            ),
         )
 
     def report(self, hours: float, force: bool = False) -> dict[str, Any]:

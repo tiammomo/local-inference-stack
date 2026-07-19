@@ -2,12 +2,14 @@
 Description=Reconcile the selected local inference runtime after login or boot
 After=network-online.target docker.service
 Wants=network-online.target
+OnFailure=qwen-model-production-alert@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=@PROJECT_ROOT@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
 Environment=QWEN_BOOT_PROFILE=latency
+ExecStartPre=@PROJECT_ROOT@/scripts/production-alert.sh clear qwen-model-runtime.service
 ExecStart=@PROJECT_ROOT@/scripts/runtime-reconcile.sh
 RemainAfterExit=yes
 TimeoutStartSec=10m

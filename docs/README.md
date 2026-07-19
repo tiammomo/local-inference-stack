@@ -20,6 +20,7 @@ Catalog 推荐；当前唯一实机验证档案是 Qwen3.5-9B Q5_K_M / RTX 5070 
 - [MODELPORT.md](MODELPORT.md)：ModelPort 路由配置和调用方式。
 - [OPERATIONS.md](OPERATIONS.md)：日常启停、监控、升级和故障处理。
 - [MAINTENANCE.md](MAINTENANCE.md)：长期运营、实际调用观测、告警阈值和调优闭环。
+- [SINGLE_HOST_PRODUCTION.md](SINGLE_HOST_PRODUCTION.md)：单机备份、恢复演练、日志轮转、主动告警和稳定性门禁。
 - [RUNTIME_DASHBOARD.md](RUNTIME_DASHBOARD.md)：本地模型运行台、字段口径和维护方式。
 - [ACCEPTANCE.md](ACCEPTANCE.md)：验收范围、命令和通过标准。
 - [QUALITY_AND_RELEASE.md](QUALITY_AND_RELEASE.md)：合成质量集、候选端口、晋级与回滚。

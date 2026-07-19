@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the weekly isolated ModelPort restore drill
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=qwen-model-restore-drill.service
+
+[Install]
+WantedBy=timers.target

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
@@ -17,6 +18,8 @@ MANIFEST_PATH = ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.js
 CONTRACT_PATH = ROOT_DIR / "contracts" / "local-qwen-provider-v1.json"
 CONTAINER_NAME = "qwen35-9b-q5km"
 MODELPORT_CONTAINER_NAME = "modelport-modelport-1"
+MODELPORT_POSTGRES_CONTAINER_NAME = "modelport-postgres-1"
+MODELPORT_DASHBOARD_CONTAINER_NAME = "modelport-dashboard-1"
 
 
 def sha256(path: Path) -> str:
@@ -54,6 +57,12 @@ def main() -> int:
     container = command_json("docker", "inspect", CONTAINER_NAME)[0]
     modelport_container = command_json(
         "docker", "inspect", MODELPORT_CONTAINER_NAME
+    )[0]
+    modelport_postgres_container = command_json(
+        "docker", "inspect", MODELPORT_POSTGRES_CONTAINER_NAME
+    )[0]
+    modelport_dashboard_container = command_json(
+        "docker", "inspect", MODELPORT_DASHBOARD_CONTAINER_NAME
     )[0]
     props = get_json("http://127.0.0.1:18080/props")
     slots = get_json("http://127.0.0.1:18080/slots")
@@ -105,6 +114,18 @@ def main() -> int:
         True,
     )
     check("all capabilities dropped", host_config.get("CapDrop") or [], ["ALL"])
+    runtime_log = host_config.get("LogConfig", {}) or {}
+    check("runtime log driver", runtime_log.get("Type"), runtime["logging"]["driver"])
+    check(
+        "runtime log max size",
+        (runtime_log.get("Config") or {}).get("max-size"),
+        runtime["logging"]["maxSize"],
+    )
+    check(
+        "runtime log max files",
+        (runtime_log.get("Config") or {}).get("max-file"),
+        str(runtime["logging"]["maxFiles"]),
+    )
     binding = (host_config.get("PortBindings") or {}).get("8080/tcp", [{}])[0]
     check("diagnostic bind address", binding.get("HostIp"), "127.0.0.1")
     check("diagnostic port", binding.get("HostPort"), "18080")
@@ -171,11 +192,70 @@ def main() -> int:
         modelport_host.get("CapDrop") or [],
         ["ALL"],
     )
+    for label, inspected in (
+        ("ModelPort", modelport_container),
+        ("ModelPort PostgreSQL", modelport_postgres_container),
+        ("ModelPort Dashboard", modelport_dashboard_container),
+    ):
+        log_config = inspected.get("HostConfig", {}).get("LogConfig", {}) or {}
+        check(
+            f"{label} log driver",
+            log_config.get("Type"),
+            gateway["logging"]["driver"],
+        )
+        check(
+            f"{label} log max size",
+            (log_config.get("Config") or {}).get("max-size"),
+            gateway["logging"]["maxSize"],
+        )
+        check(
+            f"{label} log max files",
+            (log_config.get("Config") or {}).get("max-file"),
+            str(gateway["logging"]["maxFiles"]),
+        )
     modelport_binding = (modelport_host.get("PortBindings") or {}).get(
         "38082/tcp", [{}]
     )[0]
     check("ModelPort bind address", modelport_binding.get("HostIp"), "127.0.0.1")
     check("ModelPort port", modelport_binding.get("HostPort"), "38082")
+
+    for unit in manifest["operations"]["enabledUnits"]:
+        enabled = subprocess.run(
+            ["systemctl", "--user", "is-enabled", unit],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        check(f"{unit} enabled", enabled.stdout.strip(), "enabled")
+        check(f"{unit} active", active.stdout.strip(), "active")
+
+    backup_dir = ROOT_DIR / manifest["operations"]["backupDirectory"]
+    backup_archives = [
+        path
+        for path in backup_dir.glob("modelport-*.tar.gz")
+        if path.is_file() and not path.is_symlink()
+    ]
+    check("ModelPort backup available", bool(backup_archives), True)
+    if backup_archives:
+        latest_backup = max(backup_archives, key=lambda path: path.stat().st_mtime_ns)
+        backup_age_hours = round((time.time() - latest_backup.stat().st_mtime) / 3600, 3)
+        backup_permissions = (
+            backup_dir.stat().st_mode & 0o077 == 0
+            and latest_backup.stat().st_mode & 0o077 == 0
+        )
+        check(
+            "ModelPort backup freshness",
+            backup_age_hours,
+            f"<={manifest['operations']['backupMaxAgeHours']}h",
+            backup_age_hours <= manifest["operations"]["backupMaxAgeHours"],
+        )
+        check("ModelPort backup permissions", backup_permissions, True)
     command = container.get("Config", {}).get("Cmd", []) or []
     check("KV snapshot path enabled", "--slot-save-path" in command, True)
     if "--slot-save-path" in command:
@@ -248,6 +328,46 @@ def main() -> int:
         "dashboard baseline SHA256",
         sha256(ROOT_DIR / "dashboard" / "runtime-baseline.json"),
         configuration["dashboardBaselineSha256"],
+    )
+    check(
+        "dashboard application SHA256",
+        sha256(ROOT_DIR / "dashboard" / "app.js"),
+        configuration["dashboardApplicationSha256"],
+    )
+    check(
+        "dashboard document SHA256",
+        sha256(ROOT_DIR / "dashboard" / "index.html"),
+        configuration["dashboardDocumentSha256"],
+    )
+    check(
+        "dashboard server SHA256",
+        sha256(ROOT_DIR / "scripts" / "operations-dashboard.py"),
+        configuration["dashboardServerSha256"],
+    )
+    check(
+        "dashboard smoke SHA256",
+        sha256(ROOT_DIR / "scripts" / "dashboard-smoke.py"),
+        configuration["dashboardSmokeSha256"],
+    )
+    check(
+        "operations report SHA256",
+        sha256(ROOT_DIR / "scripts" / "operations-report.py"),
+        configuration["operationsReportSha256"],
+    )
+    check(
+        "backup orchestrator SHA256",
+        sha256(ROOT_DIR / "scripts" / "modelport-backup.sh"),
+        configuration["backupOrchestratorSha256"],
+    )
+    check(
+        "soak gate SHA256",
+        sha256(ROOT_DIR / "scripts" / "soak-check.py"),
+        configuration["soakCheckSha256"],
+    )
+    check(
+        "systemd installer SHA256",
+        sha256(ROOT_DIR / "scripts" / "install-user-services.py"),
+        configuration["systemdInstallerSha256"],
     )
     check("contract provider", contract.get("provider"), interfaces["modelportProvider"])
     check(

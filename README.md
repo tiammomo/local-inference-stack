@@ -17,7 +17,8 @@ reviewed local model with pinned artifacts and repeatable acceptance.
 - 固定 URL、字节数和 SHA256 的可续传下载；
 - 经过安全收敛的 llama.cpp CUDA Compose 运行时；
 - 思考模式、长上下文、质量、性能和 Tool Use 验收；
-- 可选的 ModelPort Anthropic Messages 接入与实时运行台。
+- 可选的 ModelPort Anthropic Messages 接入与实时运行台；
+- 单机生产所需的完整备份、隔离恢复演练、日志轮转和连续稳定性门禁。
 
 当前唯一实机验证基线是 **RTX 5070 Ti 16GB + Qwen3.5-9B Q5_K_M +
 128K 单 Slot + Q8_0 KV**。其他档位是保守的启动估算，必须在目标机器通过
@@ -91,6 +92,10 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 ./scripts/model-manager.py verify --cached
 ./scripts/install-user-services.py --enable
 ```
+
+需要长期运行时，按[单机生产运行](docs/SINGLE_HOST_PRODUCTION.md)配置 ModelPort
+备份位置和运营凭证，再启用 `--operations`。代码验收后使用
+`scripts/soak-check.py --minimum-hours 72` 收集连续运行证据。
 
 ## Agent 操作契约
 

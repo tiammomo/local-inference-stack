@@ -70,6 +70,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--failure-rate-warn", type=float, default=0.05)
     parser.add_argument("--tool-failure-rate-warn", type=float, default=0.05)
     parser.add_argument("--p95-latency-ms-warn", type=int, default=180_000)
+    parser.add_argument(
+        "--disk-free-percent-warn",
+        type=float,
+        default=float(os.environ.get("OPERATIONS_DISK_FREE_PERCENT_WARN", "10")),
+    )
+    parser.add_argument(
+        "--disk-free-bytes-warn",
+        type=int,
+        default=int(os.environ.get("OPERATIONS_DISK_FREE_BYTES_WARN", str(20 * 1024**3))),
+    )
+    parser.add_argument(
+        "--backup-max-age-hours",
+        type=float,
+        default=float(os.environ.get("OPERATIONS_BACKUP_MAX_AGE_HOURS", "36")),
+    )
     parser.add_argument("--output", type=Path, help="write the report atomically to this path")
     parser.add_argument(
         "--save",
@@ -92,6 +107,12 @@ def parse_args() -> argparse.Namespace:
         value = getattr(args, name)
         if value < 0 or value > 1:
             parser.error(f"--{name.replace('_', '-')} must be in [0, 1]")
+    if args.disk_free_percent_warn < 0 or args.disk_free_percent_warn > 100:
+        parser.error("--disk-free-percent-warn must be in [0, 100]")
+    if args.disk_free_bytes_warn < 0:
+        parser.error("--disk-free-bytes-warn must not be negative")
+    if args.backup_max_age_hours <= 0:
+        parser.error("--backup-max-age-hours must be positive")
     if args.save and args.output:
         parser.error("use only one of --save and --output")
     return args
@@ -480,6 +501,9 @@ def host_snapshot() -> dict[str, Any] | None:
         swap_total = values.get("SwapTotal", 0)
         swap_free = values.get("SwapFree", 0)
         load = os.getloadavg()
+        filesystem = os.statvfs(ROOT_DIR)
+        disk_total = filesystem.f_frsize * filesystem.f_blocks
+        disk_free = filesystem.f_frsize * filesystem.f_bavail
         return {
             "memoryTotalBytes": total,
             "memoryUsedBytes": max(0, total - available),
@@ -487,9 +511,69 @@ def host_snapshot() -> dict[str, Any] | None:
             "swapTotalBytes": swap_total,
             "swapUsedBytes": max(0, swap_total - swap_free),
             "loadAverage": [round(value, 2) for value in load],
+            "diskTotalBytes": disk_total,
+            "diskUsedBytes": max(0, disk_total - disk_free),
+            "diskFreeBytes": disk_free,
+            "diskFreePercent": round((disk_free / disk_total) * 100, 2)
+            if disk_total
+            else 0.0,
         }
     except (OSError, ValueError, KeyError):
         return None
+
+
+def backup_snapshot(now_ms: int | None = None) -> dict[str, Any]:
+    directory = Path(
+        os.environ.get("MODELPORT_BACKUP_DIR", ROOT_DIR / "backups" / "modelport")
+    )
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    try:
+        archives = [
+            path
+            for path in directory.glob("modelport-*.tar.gz")
+            if path.is_file() and not path.is_symlink()
+        ]
+        if not archives:
+            return {
+                "available": False,
+                "archiveCount": 0,
+                "latestAgeHours": None,
+                "securePermissions": False,
+            }
+        latest = max(archives, key=lambda path: path.stat().st_mtime_ns)
+        stat = latest.stat()
+        directory_mode = directory.stat().st_mode & 0o777
+        file_mode = stat.st_mode & 0o777
+        return {
+            "available": True,
+            "archiveCount": len(archives),
+            "latestAtEpochMs": stat.st_mtime_ns // 1_000_000,
+            "latestAgeHours": round(
+                max(0, now_ms - stat.st_mtime_ns // 1_000_000) / 3_600_000,
+                3,
+            ),
+            "latestSizeBytes": stat.st_size,
+            "securePermissions": directory_mode & 0o077 == 0 and file_mode & 0o077 == 0,
+        }
+    except OSError:
+        return {
+            "available": False,
+            "archiveCount": 0,
+            "latestAgeHours": None,
+            "securePermissions": False,
+        }
+
+
+def persistent_service_alerts() -> list[str]:
+    directory = ROOT_DIR / "logs" / "alerts"
+    try:
+        return sorted(
+            path.stem
+            for path in directory.glob("*.json")
+            if path.is_file() and not path.is_symlink()
+        )
+    except OSError:
+        return []
 
 
 def container_snapshot() -> list[dict[str, Any]]:
@@ -661,9 +745,40 @@ def build_report(
     p95_latency = percentile(latencies, 0.95)
 
     qwen = qwen_snapshot(args.qwen_url)
+    host = host_snapshot()
+    backups = backup_snapshot(now_ms)
+    service_alerts = persistent_service_alerts()
     alerts: list[dict[str, Any]] = []
+    if not ready:
+        alerts.append({"code": "modelport_not_ready", "value": False})
     if not qwen["healthy"]:
         alerts.append({"code": "qwen_unhealthy", "value": False})
+    if host and (
+        host["diskFreePercent"] < args.disk_free_percent_warn
+        or host["diskFreeBytes"] < args.disk_free_bytes_warn
+    ):
+        alerts.append(
+            {
+                "code": "host_disk_low",
+                "value": {
+                    "freeBytes": host["diskFreeBytes"],
+                    "freePercent": host["diskFreePercent"],
+                },
+            }
+        )
+    if not backups["available"]:
+        alerts.append({"code": "modelport_backup_missing", "value": False})
+    elif backups["latestAgeHours"] > args.backup_max_age_hours:
+        alerts.append(
+            {
+                "code": "modelport_backup_stale",
+                "value": backups["latestAgeHours"],
+            }
+        )
+    if backups["available"] and not backups["securePermissions"]:
+        alerts.append({"code": "modelport_backup_permissions", "value": False})
+    if service_alerts:
+        alerts.append({"code": "systemd_service_failure", "value": service_alerts})
     if failure_rate >= args.failure_rate_warn and rows:
         alerts.append({"code": "failure_rate", "value": round(failure_rate, 6)})
     if tool_failure_rate >= args.tool_failure_rate_warn and tool_rows:
@@ -742,6 +857,8 @@ def build_report(
             "qwenHealthy": qwen["healthy"],
             "ledgerSignals": ledger_signals,
             "unreconciledAcknowledgedBaseline": args.unreconciled_baseline,
+            "backups": backups,
+            "failedServices": service_alerts,
         },
         "traffic": {
             "requests": len(rows),
@@ -801,7 +918,7 @@ def build_report(
             ),
             "qwen": qwen,
             "gpu": gpu_snapshot(),
-            "host": host_snapshot(),
+            "host": host,
             "containers": container_snapshot(),
         },
         "alerts": alerts,

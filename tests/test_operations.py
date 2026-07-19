@@ -5,6 +5,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -26,9 +27,40 @@ dashboard = load_module(
 tool_workflow = load_module(
     "tool_workflow_test", ROOT / "scripts" / "tool-workflow-eval.py"
 )
+soak_check = load_module("soak_check_test", ROOT / "scripts" / "soak-check.py")
 
 
 class OperationsReportTests(unittest.TestCase):
+    def test_docker_nanosecond_timestamp_is_parsed_for_soak_gate(self) -> None:
+        parsed = soak_check.parse_docker_time("2026-07-19T11:38:11.052738421Z")
+        self.assertEqual(parsed.microsecond, 52_738)
+        self.assertEqual(parsed.utcoffset().total_seconds(), 0)
+
+    def test_backup_snapshot_reports_age_and_restrictive_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory)
+            backup_dir.chmod(0o700)
+            archive = backup_dir / "modelport-20260719T000000Z.tar.gz"
+            archive.write_bytes(b"backup")
+            archive.chmod(0o600)
+            now_ms = archive.stat().st_mtime_ns // 1_000_000 + 3_600_000
+            with patch.dict("os.environ", {"MODELPORT_BACKUP_DIR": directory}):
+                snapshot = report.backup_snapshot(now_ms)
+            self.assertTrue(snapshot["available"])
+            self.assertEqual(snapshot["archiveCount"], 1)
+            self.assertEqual(snapshot["latestAgeHours"], 1.0)
+            self.assertTrue(snapshot["securePermissions"])
+
+    def test_backup_snapshot_rejects_symlink_only_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory)
+            target = backup_dir / "outside.tar.gz"
+            target.write_bytes(b"backup")
+            (backup_dir / "modelport-linked.tar.gz").symlink_to(target)
+            with patch.dict("os.environ", {"MODELPORT_BACKUP_DIR": directory}):
+                snapshot = report.backup_snapshot()
+            self.assertFalse(snapshot["available"])
+
     def test_synthetic_traffic_prefers_explicit_class_and_keeps_legacy_match(self) -> None:
         self.assertTrue(report.is_synthetic_traffic({"trafficClass": "synthetic"}))
         self.assertTrue(
@@ -102,6 +134,12 @@ class OperationsReportTests(unittest.TestCase):
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_dashboard_report_arguments_include_production_thresholds(self) -> None:
+        args = dashboard.DashboardState._args(object(), 24.0)
+        self.assertEqual(args.disk_free_percent_warn, 10.0)
+        self.assertEqual(args.disk_free_bytes_warn, 20 * 1024**3)
+        self.assertEqual(args.backup_max_age_hours, 36.0)
+
     def test_history_does_not_invent_ttft_without_stream_samples(self) -> None:
         point = dashboard.DashboardState._history_point(
             {

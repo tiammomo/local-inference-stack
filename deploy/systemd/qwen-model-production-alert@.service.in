@@ -1,0 +1,14 @@
+[Unit]
+Description=Record and optionally deliver a local inference failure alert for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=@PROJECT_ROOT@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-@PROJECT_ROOT@/profiles/alerting.local.env
+ExecStart=@PROJECT_ROOT@/scripts/production-alert.sh fire %i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@PROJECT_ROOT@/logs/alerts

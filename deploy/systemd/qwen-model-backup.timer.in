@@ -1,0 +1,11 @@
+[Unit]
+Description=Create the daily ModelPort single-host backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=qwen-model-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -2,6 +2,7 @@
 Description=Local inference read-only operations dashboard
 After=network-online.target docker.service qwen-model-operations-report.service
 Wants=network-online.target
+OnFailure=qwen-model-production-alert@%n.service
 
 [Service]
 Type=simple
@@ -11,6 +12,8 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/u
 EnvironmentFile=-@PROJECT_ROOT@/profiles/deployment.local.env
 EnvironmentFile=@PROJECT_ROOT@/profiles/operations.secrets.env
 EnvironmentFile=@PROJECT_ROOT@/profiles/operations.env
+EnvironmentFile=-@PROJECT_ROOT@/profiles/backup.local.env
+ExecStartPre=@PROJECT_ROOT@/scripts/production-alert.sh clear qwen-model-operations-dashboard.service
 ExecStart=/usr/bin/python3 @PROJECT_ROOT@/scripts/operations-dashboard.py --host 127.0.0.1 --port 33004
 Restart=on-failure
 RestartSec=3s

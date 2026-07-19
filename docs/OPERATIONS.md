@@ -62,6 +62,19 @@ scripts/operations-report.sh --hours 24 --save
 Prompt、回复、工具名/参数/结果、原始错误、请求 ID、用户、Key ID 或客户端 IP。
 阈值、周期任务和问题到回归测试的映射见 [长期维护](MAINTENANCE.md)。
 每日报告已由 user systemd 的 `qwen-model-operations-report.timer` 执行。
+报告也检查主机磁盘、最近完整备份、备份权限和 systemd 失败标记；运行台会在下一次
+5 秒聚合推送中显示这些状态。
+
+单机备份与恢复证明：
+
+```bash
+scripts/modelport-backup.sh create
+scripts/modelport-backup.sh verify
+scripts/modelport-backup.sh drill
+scripts/soak-check.py --minimum-hours 72
+```
+
+自动周期、敏感数据边界和异机加密要求见[单机生产运行](SINGLE_HOST_PRODUCTION.md)。
 
 ## 启动顺序
 

@@ -127,7 +127,7 @@ standard_suite() {
   run_step "ModelPort context admission" \
     "$ROOT_DIR/scripts/modelport-context-admission-smoke.sh"
   run_step "Operations dashboard" \
-    curl --noproxy '*' -fsS http://127.0.0.1:33004/api/health
+    python3 "$ROOT_DIR/scripts/dashboard-smoke.py"
   printf '\n'
   run_step "ModelPort reasoning mapping" \
     "$ROOT_DIR/scripts/modelport-reasoning-smoke.sh"

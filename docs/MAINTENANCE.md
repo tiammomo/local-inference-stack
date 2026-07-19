@@ -106,6 +106,9 @@ Tool 请求成功率不表示工具已执行或最终答案正确。巡检应同
 | llama.cpp deferred | 当前大于 0 | 核对单 Slot 是否被并发请求占用，必要时临时吞吐档 |
 | 账本 unreconciled/过期租约 | 超过已确认基线或当前存在过期租约 | 对照进程重启和 Provider 证据，不自动补记费用 |
 | 报告截断 | 窗口记录超过抓取上限 | 提高 `--max-records`，并检查日志保留上限 |
+| 主机磁盘 | 可用低于 10% 或 20 GiB | 检查有界 Docker 日志、备份和未跟踪制品 |
+| ModelPort 备份 | 缺失、超过 36 小时或权限过宽 | 手工 create/verify，检查 backup timer journal |
+| systemd 生产单元 | `logs/alerts/` 存在失败标记 | 查看对应 user journal，修复后重跑 unit |
 
 阈值可通过 `--failure-rate-warn`、`--tool-failure-rate-warn` 和
 `--p95-latency-ms-warn` 调整。深度思考或 92K 输入的慢请求不应直接判为退化；必须
@@ -134,7 +137,7 @@ Tool 请求成功率不表示工具已执行或最终答案正确。巡检应同
 
 ### 每月或升级前
 
-1. 备份 ModelPort 数据和 PostgreSQL，遵循 ModelPort `docs/OPERATIONS.md`。
+1. 检查每日 ModelPort/PostgreSQL 完整备份，并确认本周隔离恢复演练通过。
 2. 运行完整回归，包括 118K 召回、92K 解码、Tool Use 和 Provider matrix。
 3. 记录镜像 digest、模型 SHA256、配置 diff、测试结果和已知限制。
 4. 评估 5,000 条请求日志是否覆盖所需观察窗口；扩容前同时评估隐私和整文档
