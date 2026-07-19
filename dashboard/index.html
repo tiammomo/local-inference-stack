@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#071019" />
+    <title>Local Inference Stack · Qwen3.5-9B</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div>
+          <p class="eyebrow">QWEN3.5-9B / ACTIVE DEPLOYMENT</p>
+          <h1>Local Inference Stack</h1>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="connection-state" id="connection-state" role="status">
+          <span class="status-dot"></span>
+          <span id="connection-label">WebSocket 连接中</span>
+        </div>
+        <div class="window-picker" aria-label="统计时间范围">
+          <button data-hours="1">1H</button>
+          <button data-hours="6">6H</button>
+          <button class="active" data-hours="24">24H</button>
+          <button data-hours="168">7D</button>
+        </div>
+        <button class="refresh-button" id="refresh-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+          <span>刷新</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="dashboard-shell">
+      <section class="notice hidden" id="alert-banner" aria-live="polite"></section>
+
+      <section class="hero-grid" aria-label="模型基础状态">
+        <article class="panel model-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">ACTIVE DEPLOYMENT</p>
+              <h2 id="model-name">Qwen3.5-9B</h2>
+            </div>
+            <span class="health-badge loading" id="model-health">检测中</span>
+          </div>
+          <div class="model-subtitle">
+            <span id="model-alias">qwen3.5-9b-q5km</span>
+            <span class="separator">/</span>
+            <span id="model-type">Q5_K_M</span>
+          </div>
+          <div class="context-block">
+            <div class="context-row">
+              <span>上下文容量</span>
+              <strong id="context-value">128K</strong>
+            </div>
+            <div class="context-track"><span id="context-fill"></span></div>
+            <div class="context-foot">
+              <span>生产输入建议 <b id="input-budget">≈92K</b></span>
+              <span>最大输出 <b id="output-budget">32K</b></span>
+            </div>
+          </div>
+          <div class="spec-grid" id="model-specs">
+            <div><span>KV Cache</span><strong>Q8_0 / Q8_0</strong></div>
+            <div><span>思考模式</span><strong class="accent">默认开启</strong></div>
+            <div><span>运行档位</span><strong>1 × 128K</strong></div>
+            <div><span>Tool Use</span><strong>Strict</strong></div>
+          </div>
+          <div class="model-footer">
+            <span class="mono" id="runtime-build">llama.cpp —</span>
+            <span id="last-updated">等待首次数据</span>
+          </div>
+        </article>
+
+        <article class="panel gpu-panel">
+          <div class="panel-head compact">
+            <div>
+              <p class="section-kicker">GPU / CUDA</p>
+              <h2 id="gpu-name">RTX 5070 Ti</h2>
+            </div>
+            <span class="live-chip"><i></i> LIVE</span>
+          </div>
+          <div class="gpu-content">
+            <div class="gauge" id="gpu-gauge" style="--value: 0">
+              <div class="gauge-inner">
+                <strong id="gpu-memory-percent">0%</strong>
+                <span>显存</span>
+              </div>
+            </div>
+            <div class="gpu-readings">
+              <div><span>已用 / 总量</span><strong id="gpu-memory">—</strong></div>
+              <div><span>GPU 利用率</span><strong id="gpu-util">—</strong></div>
+              <div><span>温度</span><strong id="gpu-temp">—</strong></div>
+              <div><span>功耗</span><strong id="gpu-power">—</strong></div>
+            </div>
+          </div>
+          <div class="gpu-foot">
+            <span><i class="dot cyan"></i> 全层 GPU Offload</span>
+            <span><i class="dot violet"></i> Flash Attention</span>
+          </div>
+        </article>
+
+        <article class="panel throughput-panel">
+          <div class="panel-head compact">
+            <div>
+              <p class="section-kicker">INFERENCE ENGINE</p>
+              <h2>实时推理</h2>
+            </div>
+            <span class="slot-state" id="slot-state">空闲</span>
+          </div>
+          <div class="speed-stack">
+            <div class="speed-reading">
+              <span>Prompt 吞吐</span>
+              <div><strong id="prompt-speed">—</strong><small>tok/s</small></div>
+              <div class="micro-track"><i id="prompt-speed-bar"></i></div>
+            </div>
+            <div class="speed-reading">
+              <span>Generation 吞吐</span>
+              <div><strong id="generation-speed">—</strong><small>tok/s</small></div>
+              <div class="micro-track violet"><i id="generation-speed-bar"></i></div>
+            </div>
+          </div>
+          <div class="engine-grid">
+            <div><span>处理中</span><strong id="processing-count">0</strong></div>
+            <div><span>排队</span><strong id="deferred-count">0</strong></div>
+            <div><span>Prompt 总量</span><strong id="prompt-total">—</strong></div>
+            <div><span>生成总量</span><strong id="generated-total">—</strong></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="metric-strip" aria-label="调用关键指标">
+        <article class="metric-card">
+          <div class="metric-icon success">✓</div>
+          <div><span>服务可用率</span><strong id="success-rate">—</strong><small id="success-detail">—</small></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-icon latency">⌁</div>
+          <div><span>P95 生命周期延迟</span><strong id="p95-latency">—</strong><small id="latency-detail">P50 — · P99 —</small></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-icon latency">↦</div>
+          <div><span>P95 首字节延迟</span><strong id="ttft-p95">—</strong><small id="ttft-detail">P50 — · P99 —</small></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-icon success">C</div>
+          <div><span>Prompt Cache 命中</span><strong id="cache-rate">—</strong><small id="cache-detail">读取 — Token</small></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-icon tool">⌘</div>
+          <div><span>Tool Use 成功率</span><strong id="tool-rate">—</strong><small id="tool-detail">—</small></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-icon token">T</div>
+          <div><span>窗口 Token</span><strong id="token-total">—</strong><small id="token-detail">输入 — · 输出 —</small></div>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel traffic-panel span-two">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">TRAFFIC TREND</p>
+              <h2>运行趋势</h2>
+            </div>
+            <div class="legend"><span><i class="dot cyan"></i>服务可用率</span><span><i class="dot violet"></i>P95 独立轨道</span></div>
+          </div>
+          <div class="chart-wrap" id="history-chart" role="img" aria-label="历史成功率和延迟趋势">
+            <div class="empty-state">等待历史快照积累</div>
+          </div>
+          <div class="chart-foot">
+            <span id="history-range">聚合快照</span>
+            <span>5s / 1m / 1h SQLite 分层留存</span>
+          </div>
+        </article>
+
+        <article class="panel health-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">SERVICE FABRIC</p>
+              <h2>服务链路</h2>
+            </div>
+            <span class="health-summary" id="service-summary">—</span>
+          </div>
+          <div class="service-list" id="service-list">
+            <div class="service-row skeleton"></div>
+            <div class="service-row skeleton"></div>
+            <div class="service-row skeleton"></div>
+          </div>
+          <div class="protocol-flow">
+            <span>Anthropic</span><i>→</i><span>ModelPort</span><i>→</i><span>llama.cpp</span>
+          </div>
+        </article>
+
+        <article class="panel latency-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">LATENCY DISTRIBUTION</p>
+              <h2>延迟分位</h2>
+            </div>
+            <span class="window-label" id="window-label">最近 24 小时</span>
+          </div>
+          <div class="latency-bars" id="latency-bars"></div>
+        </article>
+
+        <article class="panel routing-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">ROUTING</p>
+              <h2>当前 Qwen 路由</h2>
+            </div>
+            <span class="muted" id="routing-total">—</span>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="active" data-routing-tab="logical" role="tab">逻辑档位</button>
+            <button data-routing-tab="input" role="tab">上下文</button>
+            <button data-routing-tab="providers" role="tab">Provider</button>
+          </div>
+          <div class="ranking-list" id="routing-list"></div>
+        </article>
+
+        <article class="panel tool-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">AGENT READINESS</p>
+              <h2>Tool Use</h2>
+            </div>
+            <span class="strict-chip">STRICT</span>
+          </div>
+          <div class="tool-score">
+            <strong id="tool-score">—</strong>
+            <span>工作流成功率</span>
+          </div>
+          <div class="tool-stats">
+            <div><span>请求</span><strong id="tool-requests">0</strong></div>
+            <div><span>成功</span><strong id="tool-successes">0</strong></div>
+            <div><span>失败</span><strong id="tool-failures">0</strong></div>
+          </div>
+          <div class="tool-outcomes" id="tool-outcomes"></div>
+          <div class="tool-contract">
+            <span>参数流</span><b>best_effort</b>
+            <span>响应校验</span><b>strict</b>
+          </div>
+        </article>
+
+        <article class="panel host-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">HOST MEMORY</p>
+              <h2>主机资源</h2>
+            </div>
+            <span class="muted">WSL2</span>
+          </div>
+          <div class="memory-summary"><strong id="host-memory">—</strong><span>内存已用</span></div>
+          <div class="memory-track"><span id="host-memory-fill"></span></div>
+          <div class="host-grid">
+            <div><span>可用内存</span><strong id="host-available">—</strong></div>
+            <div><span>Swap 已用</span><strong id="swap-used">—</strong></div>
+            <div><span>Load 1m</span><strong id="load-one">—</strong></div>
+            <div><span>Load 15m</span><strong id="load-fifteen">—</strong></div>
+          </div>
+        </article>
+
+        <article class="panel alerts-panel span-two">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">OPERATION SIGNALS</p>
+              <h2>告警与终态</h2>
+            </div>
+            <span class="health-summary" id="alert-count">—</span>
+          </div>
+          <div class="signals-grid">
+            <div>
+              <h3>当前告警</h3>
+              <div class="alert-list" id="alert-list"></div>
+            </div>
+            <div>
+              <h3>请求终态</h3>
+              <div class="terminal-list" id="terminal-list"></div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <footer class="footer">
+        <div>
+          <strong>当前部署 · local_qwen · Aggregate only</strong>
+          <span>不展示 Prompt、回复、工具参数、用户、Key、IP 或原始错误。</span>
+        </div>
+        <div class="footer-links">
+          <a href="http://127.0.0.1:33002" target="_blank" rel="noreferrer">ModelPort Dashboard</a>
+          <span>·</span>
+          <span id="refresh-countdown">WebSocket · 正在协商</span>
+        </div>
+      </footer>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

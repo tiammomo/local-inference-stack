@@ -1,0 +1,16 @@
+[Unit]
+Description=Reconcile the local Qwen inference runtime after login or boot
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/tiammomo/projects/infra/local-inference-stack
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
+Environment=QWEN_BOOT_PROFILE=latency
+ExecStart=/home/tiammomo/projects/infra/local-inference-stack/scripts/runtime-reconcile.sh
+RemainAfterExit=yes
+TimeoutStartSec=10m
+
+[Install]
+WantedBy=default.target

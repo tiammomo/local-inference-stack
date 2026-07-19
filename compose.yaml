@@ -1,0 +1,104 @@
+name: ${QWEN_COMPOSE_PROJECT:-qwen35-local}
+
+services:
+  qwen35:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8
+    container_name: ${QWEN_CONTAINER_NAME:-qwen35-9b-q5km}
+    user: "${QWEN_RUNTIME_UID:-1000}:${QWEN_RUNTIME_GID:-1000}"
+    init: true
+    restart: ${QWEN_RESTART_POLICY:-unless-stopped}
+    gpus: all
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    shm_size: 1gb
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    environment:
+      HOME: /cache
+      CUDA_CACHE_PATH: /cache/cuda
+    volumes:
+      - ./models/qwen3.5-9b:/models:ro
+      - ${QWEN_CACHE_DIR:-./cache}:/cache
+    ports:
+      - "${QWEN_PUBLISH_ADDRESS:-127.0.0.1:18080}:8080"
+    networks:
+      default: {}
+      modelport:
+        aliases:
+          - ${QWEN_NETWORK_ALIAS:-qwen-runtime}
+    command:
+      - --model
+      - /models/${QWEN_MODEL_FILE:-Qwen3.5-9B-Q5_K_M.gguf}
+      - --alias
+      - qwen3.5-9b-q5km
+      - --no-mmproj
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --cors-origins
+      - localhost
+      - --ctx-size
+      - ${QWEN_CTX_SIZE:-131072}
+      - --parallel
+      - ${QWEN_PARALLEL:-1}
+      - --n-predict
+      - ${QWEN_N_PREDICT:-32768}
+      - --gpu-layers
+      - all
+      - --flash-attn
+      - on
+      - --cache-type-k
+      - ${QWEN_CACHE_TYPE_K:-q8_0}
+      - --cache-type-v
+      - ${QWEN_CACHE_TYPE_V:-q8_0}
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "1024"
+      - --threads
+      - "8"
+      - --threads-batch
+      - "16"
+      - --no-context-shift
+      - --jinja
+      - --reasoning
+      - on
+      - --reasoning-format
+      - deepseek
+      - --reasoning-budget-message
+      - Now provide the final answer.
+      - --cache-ram
+      - ${QWEN_CACHE_RAM:-8192}
+      - --slot-save-path
+      - /cache/slots
+      - --spec-type
+      - ${QWEN_SPEC_TYPE:-ngram-mod}
+      - --spec-draft-n-max
+      - ${QWEN_SPEC_DRAFT_N_MAX:-6}
+      - --temp
+      - "1.0"
+      - --top-p
+      - "0.95"
+      - --top-k
+      - "20"
+      - --min-p
+      - "0.0"
+      - --presence-penalty
+      - "1.5"
+      - --repeat-penalty
+      - "1.0"
+      - --metrics
+      - --no-webui
+      - --offline
+      - --log-timestamps
+    stop_grace_period: 2m
+
+networks:
+  modelport:
+    name: ${MODELPORT_NETWORK_NAME:-modelport_default}
+    external: true

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "contractId": "local-qwen-provider-v1",
+  "provider": "local_qwen",
+  "runtime": {
+    "baseUrl": "http://qwen-runtime:8080/v1",
+    "servedModelId": "qwen3.5-9b-q5km",
+    "protocol": "openai-compatible-chat-completions"
+  },
+  "application": {
+    "protocol": "anthropic-messages",
+    "logicalModels": {
+      "qwen3.5-fast": {
+        "reasoningBudgetTokens": 512,
+        "maxOutputTokens": 4096
+      },
+      "qwen3.5-code": {
+        "reasoningBudgetTokens": 4096,
+        "maxOutputTokens": 16384
+      },
+      "qwen3.5-deep": {
+        "reasoningBudgetTokens": 16384,
+        "maxOutputTokens": 32768
+      }
+    }
+  },
+  "capabilities": {
+    "reasoning": {
+      "requestControl": true,
+      "separateReasoningContent": true
+    },
+    "tokenCounting": {
+      "mode": "anthropic",
+      "exactUpstreamTokenizer": true
+    },
+    "toolUse": {
+      "supported": true,
+      "streamingArguments": "best_effort",
+      "responseValidation": "strict",
+      "parallelToolCalls": true
+    },
+    "streaming": true
+  },
+  "limits": {
+    "contextTokens": 131072,
+    "recommendedReasoningInputTokens": 94208,
+    "maxOutputTokens": 32768
+  },
+  "acceptance": {
+    "localSuite": "scripts/acceptance-suite.sh standard",
+    "providerMatrixModel": "qwen3.5-code",
+    "toolUseMaxTokens": 2048
+  }
+}

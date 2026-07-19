@@ -1,0 +1,11 @@
+[Unit]
+Description=Generate the daily Qwen and ModelPort operations report
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=qwen-model-operations-report.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+models/**/*.gguf
+cache/
+logs/
+profiles/operations.secrets.env
+*.local.env
+.env
+__pycache__/
+*.py[cod]
+.DS_Store
+.idea/
+.vscode/

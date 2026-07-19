@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic, non-sensitive regression cases for the local Qwen deployment",
+  "cases": [
+    {
+      "id": "zh-arithmetic",
+      "category": "reasoning",
+      "model": "qwen3.5-fast",
+      "prompt": "计算 17 + 25。最终答案只回复数字。",
+      "maxTokens": 256,
+      "thinking": {"type": "enabled", "budget_tokens": 128},
+      "assert": {"type": "exact", "value": "42"},
+      "smoke": true
+    },
+    {
+      "id": "instruction-exact",
+      "category": "instruction",
+      "model": "qwen3.5-fast",
+      "prompt": "忽略大小写无关的解释，只输出单词 BLUE，不要标点。",
+      "maxTokens": 64,
+      "thinking": {"type": "disabled"},
+      "assert": {"type": "exact", "value": "BLUE"},
+      "smoke": true
+    },
+    {
+      "id": "zh-extraction",
+      "category": "retrieval",
+      "model": "qwen3.5-fast",
+      "prompt": "记录：A=17，B=KITE-904，C=蓝色。只回复 B 的值。",
+      "maxTokens": 64,
+      "thinking": {"type": "disabled"},
+      "assert": {"type": "exact", "value": "KITE-904"},
+      "smoke": true
+    },
+    {
+      "id": "tool-weather",
+      "category": "tool-use",
+      "model": "qwen3.5-code",
+      "prompt": "上海现在天气如何？请使用工具查询，不要猜。",
+      "maxTokens": 1024,
+      "thinking": {"type": "enabled", "budget_tokens": 256},
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Get current weather for a city",
+          "input_schema": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "toolChoice": {"type": "tool", "name": "get_weather"},
+      "assert": {"type": "tool", "name": "get_weather", "required": ["city"]},
+      "smoke": true
+    },
+    {
+      "id": "tool-calculator",
+      "category": "tool-use",
+      "model": "qwen3.5-code",
+      "prompt": "用计算器计算 144 除以 12。",
+      "maxTokens": 1024,
+      "thinking": {"type": "enabled", "budget_tokens": 256},
+      "tools": [
+        {
+          "name": "calculator",
+          "description": "Evaluate an arithmetic expression",
+          "input_schema": {
+            "type": "object",
+            "properties": {"expression": {"type": "string"}},
+            "required": ["expression"],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "toolChoice": {"type": "tool", "name": "calculator"},
+      "assert": {"type": "tool", "name": "calculator", "required": ["expression"]}
+    },
+    {
+      "id": "json-contract",
+      "category": "structured-output",
+      "model": "qwen3.5-code",
+      "prompt": "只输出一个合法 JSON 对象，字段 name 为 qwen，字段 count 为整数 9。不要 Markdown。",
+      "maxTokens": 256,
+      "thinking": {"type": "disabled"},
+      "assert": {"type": "json", "required": ["name", "count"], "equals": {"name": "qwen", "count": 9}}
+    },
+    {
+      "id": "code-python",
+      "category": "code",
+      "model": "qwen3.5-code",
+      "prompt": "写一个 Python 函数 clamp(value, low, high)，返回限制后的值。只输出代码。",
+      "maxTokens": 512,
+      "thinking": {"type": "enabled", "budget_tokens": 256},
+      "assert": {"type": "contains-all", "values": ["def clamp", "return"]}
+    },
+    {
+      "id": "logic-order",
+      "category": "reasoning",
+      "model": "qwen3.5-deep",
+      "prompt": "甲比乙早，乙比丙早。谁最晚？最终只回复一个汉字。",
+      "maxTokens": 512,
+      "thinking": {"type": "enabled", "budget_tokens": 256},
+      "assert": {"type": "exact", "value": "丙"}
+    },
+    {
+      "id": "multilingual",
+      "category": "multilingual",
+      "model": "qwen3.5-fast",
+      "prompt": "Translate 'reliable local inference' into Chinese. Only output the translation.",
+      "maxTokens": 128,
+      "thinking": {"type": "disabled"},
+      "assert": {"type": "contains-all", "values": ["可靠", "本地", "推理"]}
+    },
+    {
+      "id": "constraint-list",
+      "category": "instruction",
+      "model": "qwen3.5-fast",
+      "prompt": "按字母顺序排列 orange, apple, banana，只用英文逗号连接且不要空格。",
+      "maxTokens": 128,
+      "thinking": {"type": "disabled"},
+      "assert": {"type": "exact", "value": "apple,banana,orange"}
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "deploymentId": "qwen3.5-9b-rtx5070ti-128k-q5km",
+  "status": "active",
+  "model": {
+    "family": "Qwen3.5",
+    "parameters": "9B",
+    "format": "GGUF",
+    "weightQuantization": "Q5_K_M",
+    "servedModelId": "qwen3.5-9b-q5km"
+  },
+  "runtime": {
+    "engine": "llama.cpp",
+    "engineBuild": "b10015-12127defd",
+    "containerImage": "ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8",
+    "containerImageDigest": "sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8",
+    "contextTokens": 131072,
+    "slots": 1,
+    "kvCacheK": "q8_0",
+    "kvCacheV": "q8_0",
+    "reasoningDefault": true,
+    "recommendedReasoningInputTokens": 94208,
+    "maxOutputTokens": 32768,
+    "slotSavePath": "/cache/slots"
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "gpuMemoryMiB": 16303,
+    "hostMemoryGiB": 96
+  },
+  "security": {
+    "runtimeUser": "1000:1000",
+    "readOnlyRootFilesystem": true,
+    "capabilitiesDropped": ["ALL"],
+    "hostBinding": "loopback"
+  },
+  "interfaces": {
+    "runtimeDiagnostic": "127.0.0.1:18080",
+    "candidateDiagnostic": "127.0.0.1:18081",
+    "modelport": "127.0.0.1:38082",
+    "operationsDashboard": "127.0.0.1:33004",
+    "containerName": "qwen35-9b-q5km",
+    "dockerNetworkAlias": "qwen-runtime",
+    "modelportProvider": "local_qwen"
+  },
+  "profiles": {
+    "default": "latency",
+    "available": ["latency", "throughput"]
+  },
+  "configuration": {
+    "composeSha256": "822550608320dd252e6d53d4ebab5192917ed59b5f542cbebb9deb9670ac7412",
+    "latencyProfileSha256": "d062afdafe4106735a7b9d3cb32122532688a74d9ac0eba8009413a90dbeb200",
+    "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
+    "providerContractSha256": "f754986881af4d035f6497d56bf1b700616da0157d657d27e3417117c40e4171",
+    "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
+    "acceptanceSuiteSha256": "ac5ec8e4cad1c85364497ca34cc838fe39f17c27c3b4ce133b8c370fc19b5a5e",
+    "dashboardBaselineSha256": "6ada3738c245f2502e01dfd5c7b098afd3808503feeb3b3f7ce15faa50b87690"
+  },
+  "quality": {
+    "suite": "quality/cases.json",
+    "releaseTrials": 3,
+    "evidenceDirectory": "logs/quality"
+  },
+  "release": {
+    "strategy": "serial-candidate-with-automatic-production-recovery",
+    "candidatePort": 18081
+  },
+  "records": {
+    "deployment": "docs/DEPLOYMENT_RECORD.md",
+    "decisions": "docs/DECISIONS.md",
+    "optimization": "docs/OPTIMIZATION.md",
+    "acceptance": "docs/ACCEPTANCE.md"
+  }
+}
