@@ -115,6 +115,8 @@ standard_suite() {
     "$MODELPORT_DIR/scripts/provider-matrix.sh" --model qwen3.5-code
   run_step "ModelPort Tool Use" \
     "$MODELPORT_DIR/scripts/tool-use-acceptance.sh" --upstream --max-tokens 2048
+  run_step "Closed-loop Tool Use smoke" \
+    python3 "$ROOT_DIR/scripts/tool-workflow-eval.py" --smoke
   run_step "Synthetic quality smoke" \
     python3 "$ROOT_DIR/scripts/quality-eval.py" --smoke
 }
@@ -130,6 +132,8 @@ full_suite() {
     python3 "$ROOT_DIR/scripts/concurrency-benchmark.py"
   run_step "Repeated synthetic quality suite" \
     python3 "$ROOT_DIR/scripts/quality-eval.py" --trials 3
+  run_step "Forty-case closed-loop Tool Use suite" \
+    python3 "$ROOT_DIR/scripts/tool-workflow-eval.py"
 }
 
 case "$MODE" in

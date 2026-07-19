@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "description": "Forty synthetic, privacy-safe Tool Use scenarios expanded from five deterministic families",
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Return current weather for one city in the requested unit",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string", "minLength": 1},
+          "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+        },
+        "required": ["city", "unit"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "calculate",
+      "description": "Apply one arithmetic operation to two numbers",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "a": {"type": "number"},
+          "b": {"type": "number"},
+          "operator": {"type": "string", "enum": ["add", "subtract", "multiply", "divide"]}
+        },
+        "required": ["a", "b", "operator"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "lookup_inventory",
+      "description": "Look up one SKU in a named warehouse",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "type": "object",
+            "properties": {
+              "sku": {"type": "string", "pattern": "^[A-Z]{2}-[0-9]{3}$"},
+              "warehouse": {"type": "string", "enum": ["east", "west", "central"]}
+            },
+            "required": ["sku", "warehouse"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["request"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "search_knowledge",
+      "description": "Return values for an ordered list of keys in one locale",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "keys": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+          "locale": {"type": "string", "enum": ["zh-CN", "en-US"]}
+        },
+        "required": ["keys", "locale"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "families": [
+    {
+      "id": "weather",
+      "category": "tool-selection",
+      "promptTemplate": "请查询 {city} 的当前天气，温度使用摄氏度。必须使用合适的工具，不要猜测。",
+      "expectedTool": "get_weather",
+      "expectedInput": {"city": "{city}", "unit": "celsius"},
+      "toolResult": {"city": "{city}", "temperature_c": "{temperature}", "condition": "{condition}"},
+      "finalContains": ["{city}", "{temperature}", "{condition}"],
+      "variants": [
+        {"id": "shanghai", "city": "上海", "temperature": "27", "condition": "多云", "smoke": true},
+        {"id": "beijing", "city": "北京", "temperature": "31", "condition": "晴"},
+        {"id": "shenzhen", "city": "深圳", "temperature": "29", "condition": "阵雨"},
+        {"id": "hangzhou", "city": "杭州", "temperature": "28", "condition": "阴"},
+        {"id": "chengdu", "city": "成都", "temperature": "25", "condition": "小雨"},
+        {"id": "wuhan", "city": "武汉", "temperature": "33", "condition": "晴"},
+        {"id": "xian", "city": "西安", "temperature": "30", "condition": "多云"},
+        {"id": "nanjing", "city": "南京", "temperature": "32", "condition": "雷阵雨"}
+      ]
+    },
+    {
+      "id": "calculator",
+      "category": "schema-enum-number",
+      "promptTemplate": "请调用计算工具，对 {a} 和 {b} 执行 {operatorZh}，并根据工具结果回答。",
+      "expectedTool": "calculate",
+      "expectedInput": {"a": "{aNumber}", "b": "{bNumber}", "operator": "{operator}"},
+      "toolResult": {"result": "{result}"},
+      "finalContains": ["{result}"],
+      "variants": [
+        {"id": "add", "a": "17", "b": "25", "aNumber": 17, "bNumber": 25, "operator": "add", "operatorZh": "加法", "result": "42", "smoke": true},
+        {"id": "subtract", "a": "93", "b": "18", "aNumber": 93, "bNumber": 18, "operator": "subtract", "operatorZh": "减法", "result": "75"},
+        {"id": "multiply", "a": "12", "b": "11", "aNumber": 12, "bNumber": 11, "operator": "multiply", "operatorZh": "乘法", "result": "132"},
+        {"id": "divide", "a": "144", "b": "12", "aNumber": 144, "bNumber": 12, "operator": "divide", "operatorZh": "除法", "result": "12"},
+        {"id": "negative", "a": "-8", "b": "3", "aNumber": -8, "bNumber": 3, "operator": "multiply", "operatorZh": "乘法", "result": "-24"},
+        {"id": "decimal", "a": "2.5", "b": "4", "aNumber": 2.5, "bNumber": 4, "operator": "multiply", "operatorZh": "乘法", "result": "10"},
+        {"id": "large", "a": "1200", "b": "345", "aNumber": 1200, "bNumber": 345, "operator": "add", "operatorZh": "加法", "result": "1545"},
+        {"id": "fraction", "a": "7", "b": "2", "aNumber": 7, "bNumber": 2, "operator": "divide", "operatorZh": "除法", "result": "3.5"}
+      ]
+    },
+    {
+      "id": "inventory",
+      "category": "schema-nested-object",
+      "promptTemplate": "查询 SKU {sku} 在 {warehouse} 仓的库存。请使用库存工具，然后只依据结果作答。",
+      "expectedTool": "lookup_inventory",
+      "expectedInput": {"request": {"sku": "{sku}", "warehouse": "{warehouse}"}},
+      "toolResult": {"sku": "{sku}", "warehouse": "{warehouse}", "available": "{available}"},
+      "finalContains": ["{sku}", "{available}"],
+      "variants": [
+        {"id": "east-available", "sku": "AA-101", "warehouse": "east", "available": "18", "smoke": true},
+        {"id": "west-empty", "sku": "BB-202", "warehouse": "west", "available": "0"},
+        {"id": "central-low", "sku": "CC-303", "warehouse": "central", "available": "2"},
+        {"id": "east-high", "sku": "DD-404", "warehouse": "east", "available": "240"},
+        {"id": "west-one", "sku": "EE-505", "warehouse": "west", "available": "1"},
+        {"id": "central-mid", "sku": "FF-606", "warehouse": "central", "available": "64"},
+        {"id": "east-empty", "sku": "GG-707", "warehouse": "east", "available": "0"},
+        {"id": "west-mid", "sku": "HH-808", "warehouse": "west", "available": "37"}
+      ]
+    },
+    {
+      "id": "knowledge",
+      "category": "schema-array-unicode",
+      "promptTemplate": "请用知识库工具按顺序查询键 {key1} 和 {key2}，区域为 {locale}，再汇总结果。",
+      "expectedTool": "search_knowledge",
+      "expectedInput": {"keys": ["{key1}", "{key2}"], "locale": "{locale}"},
+      "toolResult": {"first": "{value1}", "second": "{value2}"},
+      "finalContains": ["{value1}", "{value2}"],
+      "variants": [
+        {"id": "zh-colors", "key1": "颜色.主色", "key2": "颜色.辅色", "locale": "zh-CN", "value1": "青色", "value2": "紫色", "smoke": true},
+        {"id": "en-build", "key1": "build.version", "key2": "build.commit", "locale": "en-US", "value1": "1.8.2", "value2": "a91f"},
+        {"id": "zh-region", "key1": "区域.东", "key2": "区域.西", "locale": "zh-CN", "value1": "浦东", "value2": "青浦"},
+        {"id": "en-flags", "key1": "feature.alpha", "key2": "feature.beta", "locale": "en-US", "value1": "enabled", "value2": "disabled"},
+        {"id": "zh-owner", "key1": "服务.所有者", "key2": "服务.等级", "locale": "zh-CN", "value1": "平台组", "value2": "P1"},
+        {"id": "en-ports", "key1": "port.gateway", "key2": "port.runtime", "locale": "en-US", "value1": "38082", "value2": "18080"},
+        {"id": "zh-status", "key1": "运行.状态", "key2": "运行.档位", "locale": "zh-CN", "value1": "正常", "value2": "code"},
+        {"id": "en-limits", "key1": "limit.context", "key2": "limit.input", "locale": "en-US", "value1": "128K", "value2": "92K"}
+      ]
+    },
+    {
+      "id": "no-tool",
+      "category": "auto-no-tool",
+      "promptTemplate": "下面已经给出答案，不要调用任何工具：代号 {code} 对应颜色 {color}。只回复颜色。",
+      "expectedTool": null,
+      "finalContains": ["{color}"],
+      "variants": [
+        {"id": "a", "code": "A-01", "color": "红色", "smoke": true},
+        {"id": "b", "code": "B-02", "color": "蓝色"},
+        {"id": "c", "code": "C-03", "color": "绿色"},
+        {"id": "d", "code": "D-04", "color": "黄色"},
+        {"id": "e", "code": "E-05", "color": "紫色"},
+        {"id": "f", "code": "F-06", "color": "白色"},
+        {"id": "g", "code": "G-07", "color": "黑色"},
+        {"id": "h", "code": "H-08", "color": "橙色"}
+      ]
+    }
+  ]
+}

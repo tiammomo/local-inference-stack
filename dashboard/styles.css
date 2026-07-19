@@ -357,13 +357,16 @@ button { font: inherit; }
 .skeleton { position: relative; overflow: hidden; border: 0; background: rgba(137, 168, 183, 0.06); }
 .skeleton::after { position: absolute; inset: 0; content: ""; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.035), transparent); transform: translateX(-100%); animation: shimmer 1.5s infinite; }
 
-.latency-bars { position: relative; z-index: 1; display: grid; gap: 15px; margin-top: 23px; }
+.latency-bars { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 21px; }
+.latency-group { display: grid; align-content: start; gap: 12px; }
+.latency-group + .latency-group { padding-left: 22px; border-left: 1px solid rgba(137, 168, 183, 0.1); }
+.latency-group h3 { margin: 0 0 2px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
 .latency-row { display: grid; grid-template-columns: 42px 1fr 64px; align-items: center; gap: 10px; }
 .latency-row span { color: var(--muted-strong); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .latency-row strong { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .latency-track { height: 7px; overflow: hidden; border-radius: 99px; background: rgba(137, 168, 183, 0.08); }
 .latency-track i { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan-strong), var(--cyan)); transition: width 500ms ease; }
-.latency-row:nth-child(3) .latency-track i, .latency-row:nth-child(4) .latency-track i { background: linear-gradient(90deg, #7169d8, var(--violet)); }
+.latency-group.e2e .latency-track i { background: linear-gradient(90deg, #7169d8, var(--violet)); }
 
 .tabs { position: relative; z-index: 1; display: inline-flex; gap: 3px; margin-top: 17px; padding: 3px; border-radius: 8px; background: rgba(7, 16, 24, 0.52); }
 .tabs button { padding: 7px 13px; border-radius: 6px; font-size: 12px; }
@@ -456,6 +459,8 @@ button { font: inherit; }
   .throughput-panel .speed-stack { grid-template-columns: 1fr; }
   .throughput-panel .engine-grid { grid-template-columns: 1fr 1fr; }
   .signals-grid { grid-template-columns: 1fr; }
+  .latency-bars { grid-template-columns: 1fr; }
+  .latency-group + .latency-group { padding-top: 16px; padding-left: 0; border-top: 1px solid rgba(137, 168, 183, 0.1); border-left: 0; }
   .footer { align-items: flex-start; flex-direction: column; }
   .chart-wrap { height: 230px; }
 }

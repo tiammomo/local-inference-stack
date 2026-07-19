@@ -51,14 +51,11 @@ Anthropic SDK 暴露 Messages API。这样既不要求 llama.cpp 模拟 Anthropi
 要求现有应用改协议。
 
 Tool Use 同样在 ModelPort 做协议语义：本地 Provider 先聚合流式函数参数，再用
-严格响应策略核验声明工具名、对象 JSON、调用 ID、`tool_choice`、并行数量和
-finish reason。只有通过校验的完整 `tool_use` 才交给 Anthropic 客户端；这不会
-改变 llama.cpp 的原生 OpenAI 端点，也不会把本地模型规则写入通用 adapter。
-
-这里的“严格”当前是协议结构级：尚未根据每个工具的 `input_schema` 验证
-`required/type/enum/additionalProperties` 等语义。llama.cpp 的 Tool Schema 主要
-通过模板引导模型，不能替代网关的响应校验。下一阶段由 ModelPort 实现完整 JSON
-Schema 校验和一次有边界的协议修复，详见
+严格响应策略核验声明工具名、对象 JSON、调用 ID、`tool_choice`、并行数量、finish
+reason 和每个工具的完整 `input_schema`。非流式违规响应直接失败；流式参数 delta
+可能先到达客户端，但违规调用不会收到成功的 `content_block_stop`，客户端必须等到
+该终态后才允许执行工具。这不会改变 llama.cpp 原生 OpenAI 端点，也不会把本地模型
+规则写入通用 adapter。一次有边界的缓冲修复仍属于下一阶段，详见
 [`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
 
 推理服务默认开启思考。ModelPort 将 Anthropic `thinking` 映射为 llama.cpp 的
@@ -91,10 +88,16 @@ fallback 到其他 Provider。应用应在拼装 system、工具 schema、历史
 会在获取推理 Slot 和创建计费租约前执行同样的精确准入：超过硬容量或思考建议上限
 返回可操作的 400，绝不静默截断；显式关闭思考时只应用 131,072 硬上限。
 
-请求账本当前提供请求级聚合 `toolOutcome`：API 请求完成、客户端取消、超时、协议
-错误、上游/交付错误或历史未知。`completed` 不表示工具已经执行、`tool_result` 已
-回传或最终任务正确完成。它不保存工具名、参数、结果和原始响应；运行台使用该字段
-区分协议请求问题与客户端主动取消。闭环状态将以枚举和数值增量实现，不放宽隐私边界。
+请求账本提供请求级聚合 `toolOutcome`：`tool_called` 表示模型产生了通过严格校验的
+调用，`continuation_tool_called` 表示 Tool Result 后继续调用，`final_answer` 表示
+续轮产生最终回答，`answered_without_tool` 表示首轮未调用直接回答；另有未观测完成、
+客户端取消、超时、协议错误、上游/交付错误和历史未知。它不保存工具名、参数、结果和
+原始响应；运行台只消费这些枚举和计数。业务工具是否正确执行以及最终任务是否正确，
+仍由应用或本项目闭环 Harness 判定。
+
+`local_qwen` 的 strict response 会按每个工具的完整 `input_schema` 校验模型参数；
+流式日志的 `firstByteLatencyMs` 从上游尝试开始，停止于首个非空正文 delta 或 Tool
+Call 事件，非流式请求不填该字段。
 
 逻辑模型是应用的稳定入口。显式物理路由
 `local_qwen:qwen3.5-9b-q5km` 保留用于诊断和验收，不应成为业务默认；否则不能明确

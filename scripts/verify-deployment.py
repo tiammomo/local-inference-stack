@@ -144,6 +144,16 @@ def main() -> int:
         configuration["acceptanceSuiteSha256"],
     )
     check(
+        "Tool workflow suite SHA256",
+        sha256(ROOT_DIR / "quality" / "tool-workflows.json"),
+        configuration["toolWorkflowSuiteSha256"],
+    )
+    check(
+        "Tool workflow harness SHA256",
+        sha256(ROOT_DIR / "scripts" / "tool-workflow-eval.py"),
+        configuration["toolWorkflowHarnessSha256"],
+    )
+    check(
         "dashboard baseline SHA256",
         sha256(ROOT_DIR / "dashboard" / "runtime-baseline.json"),
         configuration["dashboardBaselineSha256"],

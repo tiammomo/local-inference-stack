@@ -16,6 +16,7 @@ import socket
 import struct
 import threading
 import time
+from contextlib import closing
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,7 +59,7 @@ class HistoryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history_points (
@@ -134,7 +135,7 @@ class HistoryStore:
         raw = dict(point)
         raw["resolution"] = "raw"
         now_ms = int(time.time() * 1000)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 "INSERT OR REPLACE INTO history_points "
                 "(resolution, bucket_ms, window_hours, samples, payload) "
@@ -182,7 +183,7 @@ class HistoryStore:
             if hours is not None
             else (resolution, limit)
         )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(statement, parameters).fetchall()
         return [json.loads(row[0]) for row in reversed(rows)]
 
@@ -279,8 +280,14 @@ class DashboardState:
             ),
             "availabilityRate": traffic.get("serviceAvailabilityRate"),
             "p95LatencyMs": traffic.get("latencyMs", {}).get("p95", 0),
-            "ttftP95Ms": traffic.get("firstByteLatencyMs", {}).get("p95", 0),
-            "toolUseSuccessRate": report.get("toolUse", {}).get("successRate"),
+            "ttftP95Ms": (
+                traffic.get("firstByteLatencyMs", {}).get("p95")
+                if traffic.get("firstByteLatencyMs", {}).get("samples", 0) > 0
+                else None
+            ),
+            "toolUseSuccessRate": report.get("toolUse", {}).get(
+                "protocolPassRate", report.get("toolUse", {}).get("requestSuccessRate")
+            ),
             "cacheHitRate": traffic.get("tokens", {}).get("cacheHitRate"),
             "gpuMemoryUsedMiB": gpu.get("memoryUsedMiB"),
             "generationTokensPerSecond": qwen.get("generatedTokensPerSecond"),

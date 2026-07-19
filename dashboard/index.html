@@ -148,7 +148,7 @@
         </article>
         <article class="metric-card">
           <div class="metric-icon latency">↦</div>
-          <div><span>P95 首字节延迟</span><strong id="ttft-p95">—</strong><small id="ttft-detail">P50 — · P99 —</small></div>
+          <div><span>P95 流式首语义延迟</span><strong id="ttft-p95">—</strong><small id="ttft-detail">P50 — · P99 —</small></div>
         </article>
         <article class="metric-card">
           <div class="metric-icon success">C</div>
@@ -156,7 +156,7 @@
         </article>
         <article class="metric-card">
           <div class="metric-icon tool">⌘</div>
-          <div><span>Tool Use 成功率</span><strong id="tool-rate">—</strong><small id="tool-detail">—</small></div>
+          <div><span>Tool 协议通过率</span><strong id="tool-rate">—</strong><small id="tool-detail">—</small></div>
         </article>
         <article class="metric-card">
           <div class="metric-icon token">T</div>
@@ -237,17 +237,17 @@
           </div>
           <div class="tool-score">
             <strong id="tool-score">—</strong>
-            <span>工作流成功率</span>
+            <span>协议通过率</span>
           </div>
           <div class="tool-stats">
-            <div><span>请求</span><strong id="tool-requests">0</strong></div>
-            <div><span>成功</span><strong id="tool-successes">0</strong></div>
-            <div><span>失败</span><strong id="tool-failures">0</strong></div>
+            <div><span>已观测</span><strong id="tool-requests">0</strong></div>
+            <div><span>合法调用</span><strong id="tool-successes">0</strong></div>
+            <div><span>协议错误</span><strong id="tool-failures">0</strong></div>
           </div>
           <div class="tool-outcomes" id="tool-outcomes"></div>
           <div class="tool-contract">
             <span>参数流</span><b>best_effort</b>
-            <span>响应校验</span><b>strict</b>
+            <span>参数 Schema</span><b>strict JSON Schema</b>
           </div>
         </article>
 

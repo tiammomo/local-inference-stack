@@ -53,11 +53,15 @@
     "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
     "providerContractSha256": "f754986881af4d035f6497d56bf1b700616da0157d657d27e3417117c40e4171",
     "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
-    "acceptanceSuiteSha256": "ac5ec8e4cad1c85364497ca34cc838fe39f17c27c3b4ce133b8c370fc19b5a5e",
+    "acceptanceSuiteSha256": "4dfdbf4dcafb7f4c4aeff5b4ad8901f19ae1a5af589bbec263eeab57dce6ef6f",
+    "toolWorkflowSuiteSha256": "c6008e01efbd313c8d338c9f3c7e02cbaa6a5facac059efbdfe19d0492ad538a",
+    "toolWorkflowHarnessSha256": "c00b4349c0b7abd7bde4fc3dab9d6f72ae57226c30707629030bd0f6a7500415",
     "dashboardBaselineSha256": "6ada3738c245f2502e01dfd5c7b098afd3808503feeb3b3f7ce15faa50b87690"
   },
   "quality": {
     "suite": "quality/cases.json",
+    "toolWorkflowSuite": "quality/tool-workflows.json",
+    "toolWorkflowCases": 40,
     "releaseTrials": 3,
     "evidenceDirectory": "logs/quality"
   },

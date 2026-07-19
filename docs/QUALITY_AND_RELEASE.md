@@ -26,11 +26,27 @@ scripts/quality-eval.py --case tool-weather --trials 3
 工具，只断言工具名和必填字段存在。30/30 表示这组固定协议与质量冒烟稳定，不表示
 多工具选择、多步执行或业务 Tool Use 成功率达到 100%。
 
-下一阶段增加独立闭环 Tool Harness：测试夹具执行无副作用的 Calculator、Weather、
-Search、Read 等 Mock Tool，把结果作为 `tool_result` 返回，再断言最终答案和终态。
-覆盖范围、目标数量和发布门槛见
-[`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。Mock Executor 只用于验收，不
-进入 ModelPort 网关或生产应用。
+独立闭环 Tool Harness 已落地为 `quality/tool-workflows.json` 和
+`scripts/tool-workflow-eval.py`。五个场景族展开为 40 个固定 Case，覆盖多工具自动选择、
+无需工具直答、enum/number、嵌套对象、数组、Unicode 和 Tool Result 后最终答案；其中
+5 个进入 standard 冒烟：
+
+```bash
+# standard 使用的 5 Case 闭环冒烟
+scripts/tool-workflow-eval.py --smoke
+
+# 全部 40 Case；模型升级或协议变更时执行
+scripts/tool-workflow-eval.py
+
+# 单项重复定位
+scripts/tool-workflow-eval.py --case calculator-add --trials 3
+```
+
+每个 Tool Case 都严格匹配工具名和完整参数，执行确定性 Mock Tool，把结果作为
+`tool_result` 返回，并要求下一轮给出包含预期事实的最终正文且不得再次误调用。证据仅
+保存 Case ID、阶段、轮数、延迟、Token 和通过结果。Mock Executor 只用于验收，不进入
+ModelPort 网关或生产应用。后续多步、错误恢复、注入与超长结果范围见
+[`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
 
 ## 独立候选端口
 

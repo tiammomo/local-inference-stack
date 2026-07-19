@@ -277,12 +277,71 @@ def performance_summary(
                     "p95": percentile(latencies, 0.95),
                 },
                 "firstByteLatencyMs": {
+                    "samples": len(first_byte),
                     "p50": percentile(first_byte, 0.50),
                     "p95": percentile(first_byte, 0.95),
                 },
             }
         )
     return sorted(result, key=lambda item: (-item["requests"], item[field]))
+
+
+def tool_use_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    tool_rows = [row for row in rows if row.get("toolUseRequested") is True]
+    request_successes = sum(row.get("status") == "success" for row in tool_rows)
+    outcomes = Counter(
+        str(row.get("toolOutcome") or "legacy_unknown") for row in tool_rows
+    )
+    tool_calls = outcomes["tool_called"] + outcomes["continuation_tool_called"]
+    final_answers = outcomes["final_answer"] + outcomes["continuation_completed"]
+    continuation_steps = final_answers + outcomes["continuation_tool_called"]
+    observed_decisions = sum(
+        outcomes[outcome]
+        for outcome in (
+            "tool_called",
+            "continuation_tool_called",
+            "final_answer",
+            "continuation_completed",
+            "answered_without_tool",
+        )
+    )
+    observed_requests = sum(
+        count
+        for outcome, count in outcomes.items()
+        if outcome not in {"unknown_legacy", "legacy_unknown", "completed"}
+    )
+    observable_successes = observed_decisions + outcomes["completed_unobserved"]
+    protocol_errors = outcomes["protocol_error"]
+    protocol_passes = observable_successes
+    protocol_evaluations = protocol_passes + protocol_errors
+    return {
+        "requests": len(tool_rows),
+        "requestSuccesses": request_successes,
+        "requestFailures": len(tool_rows) - request_successes,
+        "requestSuccessRate": rate(request_successes, len(tool_rows)),
+        "successes": request_successes,
+        "failures": len(tool_rows) - request_successes,
+        "successRate": rate(request_successes, len(tool_rows)),
+        "observedRequests": observed_requests,
+        "observedDecisions": observed_decisions,
+        "decisionCoverageRate": rate(observed_decisions, observable_successes),
+        "modelToolCalls": tool_calls,
+        "schemaValidatedCalls": tool_calls,
+        "answeredWithoutTool": outcomes["answered_without_tool"],
+        "continuationSteps": continuation_steps,
+        "continuationCompletions": final_answers,
+        "finalAnswers": final_answers,
+        "completedUnobserved": outcomes["completed_unobserved"],
+        "continuationFinalRate": rate(final_answers, continuation_steps),
+        "protocolErrors": protocol_errors,
+        "protocolEvaluations": protocol_evaluations,
+        "protocolPassRate": rate(protocol_passes, protocol_evaluations),
+        "byOutcome": dict(sorted(outcomes.items())),
+        "coverageNote": (
+            "request success is transport/protocol availability; continuationFinalRate "
+            "describes observed tool-result continuation steps, not end-to-end business success"
+        ),
+    }
 
 
 def fetch_logs(
@@ -555,11 +614,9 @@ def build_report(
     service_failures = len(service_rows) - service_successes
     timeouts = sum(row.get("status") == "timeout" for row in rows)
     streams = sum(row.get("stream") == "stream" for row in rows)
+    tool = tool_use_summary(rows)
     tool_rows = [row for row in rows if row.get("toolUseRequested") is True]
-    tool_successes = sum(row.get("status") == "success" for row in tool_rows)
-    tool_outcomes = Counter(
-        str(row.get("toolOutcome") or "legacy_unknown") for row in tool_rows
-    )
+    tool_successes = tool["requestSuccesses"]
     latencies = [
         int(row["latencyMs"])
         for row in rows
@@ -697,6 +754,7 @@ def build_report(
                 "maximum": max(latencies, default=0),
             },
             "firstByteLatencyMs": {
+                "samples": len(first_byte_latencies),
                 "average": round(sum(first_byte_latencies) / len(first_byte_latencies))
                 if first_byte_latencies
                 else 0,
@@ -710,14 +768,7 @@ def build_report(
             "byLogicalModel": performance_summary(rows, "model"),
             "byInputBucket": performance_summary(rows, "inputBucket", input_bucket),
         },
-        "toolUse": {
-            "requests": len(tool_rows),
-            "successes": tool_successes,
-            "failures": len(tool_rows) - tool_successes,
-            "successRate": rate(tool_successes, len(tool_rows)),
-            "byOutcome": dict(sorted(tool_outcomes.items())),
-            "coverageNote": "available for requests recorded after schemaVersion 1 deployment",
-        },
+        "toolUse": tool,
         "issues": {
             "byCategory": dict(sorted(issue_counts.items())),
             "byTerminalReason": dict(sorted(terminal_reasons.items())),

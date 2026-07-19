@@ -43,6 +43,12 @@ const labels = {
 const toolOutcomeLabels = {
   not_requested: '未请求工具',
   completed: '完成',
+  completed_unobserved: '完成（未观测语义）',
+  tool_called: '模型发起工具',
+  answered_without_tool: '未调用工具直接回答',
+  final_answer: '工具结果续轮完成',
+  continuation_completed: '工具结果续轮完成',
+  continuation_tool_called: '续轮再次调用工具',
   client_cancelled: '客户端取消',
   timeout: '超时',
   protocol_error: '协议错误',
@@ -95,6 +101,7 @@ function bytes(value) {
 }
 
 function duration(value) {
+  if (value === null || value === undefined || value === '') return '—'
   const milliseconds = Number(value)
   if (!Number.isFinite(milliseconds)) return '—'
   if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`
@@ -149,8 +156,10 @@ function appendStatusHistory(report) {
     successRate: traffic.serviceAvailabilityRate ?? traffic.successRate,
     availabilityRate: traffic.serviceAvailabilityRate,
     p95LatencyMs: traffic.latencyMs?.p95 || 0,
-    ttftP95Ms: traffic.firstByteLatencyMs?.p95 || 0,
-    toolUseSuccessRate: report?.toolUse?.successRate,
+    ttftP95Ms: Number(traffic.firstByteLatencyMs?.samples) > 0
+      ? traffic.firstByteLatencyMs.p95
+      : null,
+    toolUseSuccessRate: report?.toolUse?.protocolPassRate ?? report?.toolUse?.requestSuccessRate,
     cacheHitRate: traffic.tokens?.cacheHitRate,
     gpuMemoryUsedMiB: gpu.memoryUsedMiB,
     generationTokensPerSecond: qwen.generatedTokensPerSecond,
@@ -345,12 +354,16 @@ function renderMetrics() {
   setText('success-detail', `${number(traffic.serviceSuccesses ?? traffic.successes)} 成功 / ${number(traffic.serviceRequests ?? traffic.requests)} 服务请求 · 取消 ${number(traffic.clientCancellations || 0)}`)
   setText('p95-latency', duration(traffic.latencyMs.p95))
   setText('latency-detail', `P50 ${duration(traffic.latencyMs.p50)} · P99 ${duration(traffic.latencyMs.p99)}`)
-  setText('ttft-p95', duration(traffic.firstByteLatencyMs?.p95))
-  setText('ttft-detail', `P50 ${duration(traffic.firstByteLatencyMs?.p50)} · P99 ${duration(traffic.firstByteLatencyMs?.p99)}`)
+  const streamTtft = traffic.firstByteLatencyMs || {}
+  const hasTtft = Number(streamTtft.samples) > 0
+  setText('ttft-p95', duration(hasTtft ? streamTtft.p95 : undefined))
+  setText('ttft-detail', hasTtft
+    ? `P50 ${duration(streamTtft.p50)} · P99 ${duration(streamTtft.p99)} · ${number(streamTtft.samples)} 流式样本`
+    : '等待流式首语义样本')
   setText('cache-rate', percent(tokens.cacheHitRate))
   setText('cache-detail', `读取 ${compact(tokens.cacheRead)} Token`)
-  setText('tool-rate', percent(tool.successRate))
-  setText('tool-detail', `${number(tool.successes)} 成功 / ${number(tool.requests)} 工作流`)
+  setText('tool-rate', percent(tool.protocolPassRate))
+  setText('tool-detail', `${number(tool.modelToolCalls)} 次合法调用 · ${number(tool.continuationCompletions)} 次续轮完成`)
   setText('token-total', compact((tokens.input || 0) + (tokens.output || 0) + (tokens.cacheRead || 0) + (tokens.cacheWrite || 0)))
   setText('token-detail', `输入 ${compact(tokens.input)} · 输出 ${compact(tokens.output)}`)
   setText('window-label', windowName(state.hours))
@@ -484,20 +497,31 @@ function renderServices() {
 function renderLatency() {
   const latency = state.status.traffic.latencyMs
   const firstByte = state.status.traffic.firstByteLatencyMs || {}
-  const rows = [
-    ['TTFT P50', firstByte.p50],
-    ['TTFT P95', firstByte.p95],
-    ['E2E P50', latency.p50],
-    ['E2E P95', latency.p95],
-    ['E2E P99', latency.p99],
+  const hasTtft = Number(firstByte.samples) > 0
+  const groups = [
+    ['流式首语义 TTFT', [
+      ['P50', hasTtft ? firstByte.p50 : undefined],
+      ['P95', hasTtft ? firstByte.p95 : undefined],
+      ['P99', hasTtft ? firstByte.p99 : undefined],
+    ]],
+    ['完整生命周期 E2E', [
+      ['P50', latency.p50],
+      ['P95', latency.p95],
+      ['P99', latency.p99],
+    ]],
   ]
-  const maximum = Math.max(...rows.map(([, value]) => Number(value) || 0), 1)
-  $('latency-bars').innerHTML = rows.map(([label, value]) => `
-    <div class="latency-row">
-      <span>${label}</span>
-      <div class="latency-track"><i style="width:${clamp(Number(value) / maximum * 100)}%"></i></div>
-      <strong>${escapeHtml(duration(value))}</strong>
-    </div>`).join('')
+  $('latency-bars').innerHTML = groups.map(([title, rows], groupIndex) => {
+    const maximum = Math.max(...rows.map(([, value]) => Number(value) || 0), 1)
+    return `<section class="latency-group ${groupIndex ? 'e2e' : 'ttft'}">
+      <h3>${escapeHtml(title)}</h3>
+      ${rows.map(([label, value]) => `
+        <div class="latency-row">
+          <span>${label}</span>
+          <div class="latency-track"><i style="width:${clamp(Number(value) / maximum * 100)}%"></i></div>
+          <strong>${escapeHtml(duration(value))}</strong>
+        </div>`).join('')}
+    </section>`
+  }).join('')
 }
 
 function renderRouting() {
@@ -523,11 +547,11 @@ function renderRouting() {
 
 function renderToolUse() {
   const tool = state.status.toolUse
-  const score = tool.successRate === null ? '—' : percent(tool.successRate)
+  const score = tool.protocolPassRate === null ? '—' : percent(tool.protocolPassRate)
   setText('tool-score', score)
-  setText('tool-requests', number(tool.requests))
-  setText('tool-successes', number(tool.successes))
-  setText('tool-failures', number(tool.failures))
+  setText('tool-requests', number(tool.observedRequests))
+  setText('tool-successes', number(tool.schemaValidatedCalls))
+  setText('tool-failures', number(tool.protocolErrors))
   const outcomes = Object.entries(tool.byOutcome || {})
     .sort((left, right) => Number(right[1]) - Number(left[1]))
   $('tool-outcomes').innerHTML = outcomes.length

@@ -1,9 +1,26 @@
 # 推理与 Tool Use 增强路线图
 
-状态：规划完成，待分批实现。
+状态：P0 第一批已实现并进入验收；有边界修复、多步/错误恢复与 traffic class 待实现。
 
 审查基线：2026-07-19，Qwen3.5-9B Q5_K_M、128K 单 Slot、Q8_0 K/V、llama.cpp、
 ModelPort Anthropic Messages 入口。
+
+## 2026-07-19 第一批实现进度
+
+- ModelPort strict response 已按工具编译并校验完整 JSON Schema，覆盖嵌套对象、数组、
+  `required`、类型、`enum`、约束和 `additionalProperties`；外部 Schema 引用在入口
+  fail-closed，错误值脱敏。
+- Tool 请求日志已区分 `tool_called`、`continuation_tool_called`、`final_answer`、
+  `answered_without_tool`、`completed_unobserved` 和错误终态，不再用 HTTP 2xx 代表模型
+  一定调用了工具。
+- 流式 `firstByteLatencyMs` 改为首个非空正文 delta 或 Tool Call 事件；非流式保持空值。
+- 本项目新增 40 个固定闭环场景，5 个进入 standard 冒烟；Harness 校验工具选择和完整
+  参数、执行确定性 Mock Tool、回传 `tool_result` 并验证最终答案。
+- 运行台把请求可用性、协议通过、合法 Tool Call 与续轮完成分开，并使用独立 TTFT/E2E
+  比例尺展示分位。
+
+尚未完成：协议自动修复、多步与 `is_error` 恢复、Prompt Injection/超长结果、显式
+traffic class、Reasoning/正文 Token 拆分和验证器驱动的档位升级。
 
 ## 目标
 
@@ -32,32 +49,31 @@ Tools 的 API 请求成功结束，不表示工具已经执行、结果已回传
 固定质量集当前是 10 个 Case 重复三次，最近基线为 30/30；其中两个 Tool Use Case
 均是强制单工具调用，只覆盖工具名和必填字段存在性，不构成闭环 Agent 能力评估。
 
-## 审查发现
+## 改造前审查发现（保留为设计依据）
 
-### 1. Tool 参数校验仍是结构级，不是 Schema 级
+### 1. Tool 参数校验曾是结构级，不是 Schema 级
 
-ModelPort 当前严格策略已经校验：声明工具名、参数必须为 JSON Object、调用 ID、
-调用数量、`tool_choice`、并行约束和 finish reason。尚未使用对应工具的
+审查时 ModelPort 严格策略只校验：声明工具名、参数必须为 JSON Object、调用 ID、
+调用数量、`tool_choice`、并行约束和 finish reason，当时尚未使用对应工具的
 `input_schema` 校验 `required`、字段类型、`enum`、数组、嵌套对象和
 `additionalProperties`。
 
 llama.cpp 支持 Tool Calling，但其 Tool Schema 主要进入聊天模板，而不是自动成为
 grammar 约束；`response_format` 的 JSON Schema 能力也不等同于 Tool Call 参数的
-强约束。因此 ModelPort 仍需要在交付调用前做完整响应校验：
+强约束。因此 ModelPort 必须在非流式返回或流式成功终态前做完整响应校验：
 
 - [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
 - [llama.cpp grammars](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md)
 
 ### 2. Tool Use 成功率是请求级口径
 
-当前报告以请求 `status=success` 统计 Tool Use 成功，适合观察协议和服务可用性，
-不适合命名为闭环工作流成功率。后续必须把“模型调用”和“任务完成”分开。
+审查时报告以请求 `status=success` 统计 Tool Use 成功，适合观察协议和服务可用性，
+不适合命名为闭环工作流成功率；当前实现已经把“模型调用”和“任务完成”分开。
 
-### 3. `firstByteLatencyMs` 尚不是真正统一的 TTFT
+### 3. `firstByteLatencyMs` 曾不是真正统一的 TTFT
 
-流式路径的当前值接近上游响应建立时间；非流式路径使用完整请求耗时。二者可以用于
-观察退化，但不能混合解释为首 Token 延迟。实现真正的 TTFT 前，运行台和报告必须
-显示为“响应开始/缓冲耗时”，并按 stream/non-stream 分组。
+审查时流式路径的值接近上游响应建立时间，非流式路径使用完整请求耗时，不能混合
+解释为首 Token 延迟；当前实现已改为 stream-only 首语义 TTFT，非流式保持空值。
 
 ### 4. 逻辑 Profile 与验收流量需要显式化
 
@@ -195,7 +211,7 @@ Qwen3.5 官方建议 Thinking 场景至少保留 128K，并给出了当前 fast/
 | --- | --- | --- |
 | Request availability | 排除客户端取消后的服务成功率 | 不低于当前基线 |
 | Tool protocol pass | Tool 请求通过协议转换和帧校验 | `>=99.5%` 合成集 |
-| Tool schema pass | 已生成调用满足对应 JSON Schema | 不允许违规调用交付 |
+| Tool schema pass | 已生成调用满足对应 JSON Schema | 不允许违规调用获得可执行成功终态 |
 | Tool workflow completion | 收到 Tool Result 后产生合法最终终态 | `>=95%` 固定闭环集 |
 | Tool task success | Mock Tool 实际执行后最终答案正确 | `>=95%`，每 Case 三次 |
 | Repair recovery | 首次协议错误经一次修复后恢复 | 观测项，不以增加重试换取虚假成功 |

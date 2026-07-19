@@ -21,7 +21,7 @@ Local Inference Stack 面向单机消费级 GPU，把本地模型制品转化为
 - KV Cache：Q8_0 / Q8_0
 - 应用入口：ModelPort Anthropic Messages API
 - 推理后端：llama.cpp OpenAI-compatible API
-- Tool Use：流式参数聚合与协议结构级严格响应校验
+- Tool Use：完整 JSON Schema 严格校验、语义终态观测与 40 Case 闭环门禁
 
 ```text
 应用 / Agent
@@ -64,6 +64,10 @@ ModelPort Docker network。仓库不包含约 14GB 的 GGUF 制品；请按
 ./scripts/quality-eval.py --smoke
 ./scripts/quality-eval.py --trials 3
 
+# 闭环 Tool Use：5 Case 冒烟 / 40 Case 全量
+./scripts/tool-workflow-eval.py --smoke
+./scripts/tool-workflow-eval.py
+
 # latency: 1 × 128K；throughput: 2 × 64K
 ./scripts/runtime.sh profile latency
 ./scripts/runtime.sh profile throughput
@@ -84,9 +88,10 @@ performance baselines, quality gates, the ModelPort provider contract, and a
 privacy-preserving real-time operations dashboard.
 
 The active deployment is Qwen3.5-9B Q5_K_M on an RTX 5070 Ti with one 128K
-slot, Q8_0 KV cache, request-level reasoning budgets, and fail-closed Tool Use
-framing validation through ModelPort. Applications use the Anthropic Messages edge;
-the runtime remains an internal OpenAI-compatible implementation detail.
+slot, Q8_0 KV cache, request-level reasoning budgets, complete Tool JSON Schema
+validation, semantic Tool outcome telemetry, and a 40-case closed-loop gate.
+Applications use the Anthropic Messages edge; the runtime remains an internal
+OpenAI-compatible implementation detail.
 
 Prerequisites are Docker with the NVIDIA Container Toolkit, Python 3.12+, and
 an active ModelPort Docker network. GGUF artifacts are intentionally excluded;
@@ -146,8 +151,13 @@ client IP addresses are excluded.
 - Reasoning-aware 92K production input ceiling with explicit opt-out for
   non-reasoning capacity tests.
 - Fail-closed Tool Use framing validation and request-level outcome telemetry;
-  schema-complete validation and closed-loop task outcomes are tracked in the
-  enhancement roadmap.
+  strict mode validates complete per-tool JSON Schema before non-stream return
+  or a stream's successful `content_block_stop` terminal signal.
+- A 40-case closed-loop Tool Use suite executes deterministic mock tools,
+  returns `tool_result`, and verifies the model's final answer without retaining
+  prompts, arguments, results, or model output in evidence.
+- Stream-only TTFT measures the first deliverable text/tool event; non-stream
+  latency is never relabeled as TTFT.
 - WebSocket live operations data plus bounded SQLite aggregate retention.
 - Synthetic quality gates, recorded acceptance evidence, and serial release
   candidates on port `18081` with automatic production recovery.
@@ -157,19 +167,18 @@ client IP addresses are excluded.
 当前运行时参数已经形成稳定基线。下一阶段优先提升可验证的任务完成率，而不是无证据
 地继续增加启动参数：
 
-1. 在 ModelPort 增加 Tool 参数的完整 JSON Schema 校验、一次有边界的协议修复和
-   闭环工作流状态；实际工具执行、授权与沙箱仍由应用负责。
-2. 将当前请求级 Tool Use 成功率拆分为模型是否调用、Schema 是否通过、是否收到
-   `tool_result`、是否生成最终答案等独立指标。
-3. 扩展到多工具选择、多步调用、错误恢复、流式分片和 Prompt Injection 的闭环
-   合成质量集。
+1. 在已完成完整 JSON Schema 校验和请求级 Tool 决策观测的基础上，增加一次有边界
+   的协议修复；实际工具执行、授权与沙箱仍由应用负责。
+2. 将当前 40 Case 两轮闭环集继续扩展到多步调用、错误恢复、流式分片和 Prompt
+   Injection，并建立连续多次运行的稳定门槛。
+3. 为验收调用增加独立 traffic class，把业务 SLO 与合成流量彻底分开。
 4. 使用验证器驱动的 `fast -> code -> deep` 自适应升级，并以编译器、测试和工具
    反馈增强代码与 Agent 任务。
 5. 保留 128K 容量，但通过上下文压缩和检索把日常工作集尽量控制在 32K 内。
 
-The next phase focuses on measurable task completion: schema-complete Tool Use,
-closed-loop evaluation, accurate latency and reasoning metrics, and
-verifier-driven adaptive escalation. Runtime, gateway, and application
-responsibilities remain deliberately separated. See the
+The next phase builds on schema-complete Tool Use, closed-loop evaluation, and
+stream-only TTFT with bounded repair, multi-step/error-recovery cases, explicit
+test traffic classification, and verifier-driven adaptive escalation. Runtime,
+gateway, and application responsibilities remain deliberately separated. See the
 [enhancement roadmap](docs/ENHANCEMENT_ROADMAP.md) for priorities and release
 gates.
