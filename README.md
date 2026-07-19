@@ -1,5 +1,9 @@
 # Local Inference Stack
 
+> Agent-ready local LLM inference stack with hardware-aware model selection,
+> verified GGUF downloads, llama.cpp CUDA deployment, quality gates, Tool Use,
+> and real-time observability.
+
 让 Agent 在一台新机器上完成“检测硬件 → 推荐模型 → 安全下载 → 本地部署 →
 验收”的可复现推理栈。Clone it, let an Agent assess the host, then deploy a
 reviewed local model with pinned artifacts and repeatable acceptance.
@@ -134,5 +138,14 @@ capabilities，并固定 llama.cpp 镜像 digest。Catalog 中的哈希只能证
 或运行台直接暴露到局域网或公网。
 
 安全问题请按 [`SECURITY.md`](SECURITY.md) 使用 GitHub 私密漏洞报告；不要在公开
-Issue 中提交凭证、Prompt、回复、工具参数或原始日志。本仓库代码当前未声明开源
-许可证，公开可见不等于授予再分发权；模型与 GGUF 许可证还需分别审查。
+Issue 中提交凭证、Prompt、回复、工具参数或原始日志。
+
+## License
+
+本仓库自产的代码、配置与文档采用 [MIT License](LICENSE)。模型权重、GGUF 制品、
+容器镜像及其他第三方组件不因本仓库采用 MIT 而改变其各自许可证；使用和再分发前
+仍需分别审查。
+
+Repository-authored code, configuration, and documentation are licensed under
+the [MIT License](LICENSE). Model weights, GGUF artifacts, container images,
+and other third-party components remain subject to their own licenses.
