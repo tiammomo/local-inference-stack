@@ -23,6 +23,12 @@
     "maxOutputTokens": 32768,
     "slotSavePath": "/cache/slots"
   },
+  "gateway": {
+    "sourceCommit": "311e18a0a6a52be76a03d9672d5fdf2942bec8c4",
+    "containerImage": "modelport:local",
+    "containerImageId": "sha256:40db99c6780d08a83a29fca72f98b4a7e5a62366962819fcdd666d1c90231843",
+    "containerName": "modelport-modelport-1"
+  },
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5070 Ti",
     "gpuMemoryMiB": 16303,

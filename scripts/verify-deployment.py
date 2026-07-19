@@ -16,6 +16,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.json"
 CONTRACT_PATH = ROOT_DIR / "contracts" / "local-qwen-provider-v1.json"
 CONTAINER_NAME = "qwen35-9b-q5km"
+MODELPORT_CONTAINER_NAME = "modelport-modelport-1"
 LEGACY_PATH = Path("/home/tiammomo/projects/infra/models")
 
 
@@ -52,6 +53,9 @@ def main() -> int:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     container = command_json("docker", "inspect", CONTAINER_NAME)[0]
+    modelport_container = command_json(
+        "docker", "inspect", MODELPORT_CONTAINER_NAME
+    )[0]
     props = get_json("http://127.0.0.1:18080/props")
     slots = get_json("http://127.0.0.1:18080/slots")
     health = get_json("http://127.0.0.1:18080/health")
@@ -70,6 +74,7 @@ def main() -> int:
         )
 
     runtime = manifest["runtime"]
+    gateway = manifest["gateway"]
     interfaces = manifest["interfaces"]
     configuration = manifest["configuration"]
     expected_root = str(ROOT_DIR)
@@ -105,6 +110,63 @@ def main() -> int:
     binding = (host_config.get("PortBindings") or {}).get("8080/tcp", [{}])[0]
     check("diagnostic bind address", binding.get("HostIp"), "127.0.0.1")
     check("diagnostic port", binding.get("HostPort"), "18080")
+
+    modelport_state = modelport_container.get("State", {})
+    check("ModelPort container running", modelport_state.get("Status"), "running")
+    check(
+        "ModelPort container healthy",
+        modelport_state.get("Health", {}).get("Status"),
+        "healthy",
+    )
+    check(
+        "ModelPort container name",
+        modelport_container.get("Name", "").lstrip("/"),
+        gateway["containerName"],
+    )
+    check(
+        "ModelPort image ID",
+        modelport_container.get("Image"),
+        gateway["containerImageId"],
+    )
+    check(
+        "ModelPort configured image",
+        modelport_container.get("Config", {}).get("Image"),
+        gateway["containerImage"],
+    )
+    check(
+        "ModelPort unprivileged user",
+        modelport_container.get("Config", {}).get("User"),
+        "modelport",
+    )
+    modelport_host = modelport_container.get("HostConfig", {})
+    check(
+        "ModelPort read-only root filesystem",
+        modelport_host.get("ReadonlyRootfs"),
+        True,
+    )
+    check(
+        "ModelPort privileged mode disabled",
+        modelport_host.get("Privileged"),
+        False,
+    )
+    check(
+        "ModelPort no-new-privileges",
+        any(
+            option.startswith("no-new-privileges")
+            for option in (modelport_host.get("SecurityOpt") or [])
+        ),
+        True,
+    )
+    check(
+        "ModelPort capabilities dropped",
+        modelport_host.get("CapDrop") or [],
+        ["ALL"],
+    )
+    modelport_binding = (modelport_host.get("PortBindings") or {}).get(
+        "38082/tcp", [{}]
+    )[0]
+    check("ModelPort bind address", modelport_binding.get("HostIp"), "127.0.0.1")
+    check("ModelPort port", modelport_binding.get("HostPort"), "38082")
     command = container.get("Config", {}).get("Cmd", []) or []
     check("KV snapshot path enabled", "--slot-save-path" in command, True)
     if "--slot-save-path" in command:
