@@ -56,7 +56,7 @@
 | ModelPort 上下文准入 | 通过 | `15 + 131072 > 131072` 在占用 Slot 前返回 400；错误含精确数值和“不静默截断”保证；思考输入建议上限 94,208 |
 | 部署漂移检查 | 通过 | 36/36；模型、镜像、构建、上下文、端口、挂载、配置/质量 SHA256、最小权限和跨项目契约一致 |
 | 合成质量门禁 | 通过 | 10 个 Case × 3 次，共 30/30；覆盖推理、指令、抽取、JSON、代码、多语言和 Tool Use |
-| Tool Use 结果观测 | 通过 | `completed/client_cancelled/timeout/protocol_error/upstream_or_delivery_error/unknown_legacy` 聚合终态；不保留工具内容 |
+| Tool Use 结果观测 | 通过 | 请求级 `completed/client_cancelled/timeout/protocol_error/upstream_or_delivery_error/unknown_legacy` 聚合终态；不保留工具内容，`completed` 不代表闭环任务完成 |
 | 聚合时序历史 | 通过 | SQLite `0600`；24h 原始、30d 分钟和 365d 小时保留；WebSocket 查询按窗口自动选分辨率 |
 | 启动自愈 | 通过 | `qwen-model-runtime.service` 已 enabled/active；健康时幂等退出，缺失时等待 ModelPort network 后恢复 |
 | Runtime 最小权限 | 通过 | UID/GID `1000:1000`、只读根文件系统、drop ALL、no-new-privileges、仅回环端口 |

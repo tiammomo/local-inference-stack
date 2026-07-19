@@ -22,6 +22,16 @@ scripts/quality-eval.py --case tool-weather --trials 3
 延迟和 Token，不保存输入或模型输出。实际业务失败应先脱敏和最小化，再转化为新的
 合成 Case，不能直接复制生产 Prompt。
 
+当前基线为 10 个 Case，其中两个 Tool Use Case 都使用 named `tool_choice` 强制单个
+工具，只断言工具名和必填字段存在。30/30 表示这组固定协议与质量冒烟稳定，不表示
+多工具选择、多步执行或业务 Tool Use 成功率达到 100%。
+
+下一阶段增加独立闭环 Tool Harness：测试夹具执行无副作用的 Calculator、Weather、
+Search、Read 等 Mock Tool，把结果作为 `tool_result` 返回，再断言最终答案和终态。
+覆盖范围、目标数量和发布门槛见
+[`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。Mock Executor 只用于验收，不
+进入 ModelPort 网关或生产应用。
+
 ## 独立候选端口
 
 RTX 5070 Ti 16GB 无法同时驻留两份完整 128K 实例，因此候选采用“不同容器、不同
@@ -45,6 +55,7 @@ scripts/release-candidate.sh long
 
 1. 固定候选镜像 digest、模型 SHA256 和单一主要变量。
 2. 候选端口依次通过 quick、长上下文、Tool Use、三次质量集和部署余量检查。
+   Tool Use Reliability v2 上线后还必须通过完整 Schema 负例和闭环任务集。
 3. 更新 `manifest.json`、配置 SHA256、部署记录和决策记录；提交 Git tag。
 4. 用正式 `profiles/latency.env` 重建生产容器，运行 `acceptance-suite.sh standard`。
 5. 失败时恢复上一 Git tag 和对应 digest，再执行 `runtime.sh profile latency`。

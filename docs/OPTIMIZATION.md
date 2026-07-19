@@ -231,10 +231,22 @@ UID/GID `1000:1000`，继续保持只读根文件系统、drop ALL 和 no-new-pr
 
 ## 后续 A/B 观测指标
 
-每个候选至少记录：冷/热 TTFT、prompt tok/s、短/92K decode tok/s、draft
+每个候选至少记录：冷/热响应开始时间、真实流式 TTFT、prompt tok/s、短/92K decode tok/s、draft
 acceptance、cache reused tokens、cache eviction、reasoning tokens、峰值显存、主机
-RAM、正文完成率、Tool Use 成功率和 118K 召回。性能通过但质量验收失败的参数不
-进入生产配置。
+RAM、正文完成率、Tool 协议通过率、闭环任务成功率和 118K 召回。性能通过但质量
+验收失败的参数不进入生产配置。
+
+## 2026-07-19 增强审查
+
+当前生产参数继续作为稳定基线：Qwen 官方采样已经按 fast/code/deep 档位落地，
+128K 为 Thinking 保留足够上下文，q4 KV 与 MTP 也已经被本机 A/B 否决。进一步收益
+主要来自完整 Tool Schema 校验、闭环工作流观测、验证器反馈、上下文工作集控制和
+真实 TTFT，而不是继续堆叠 llama.cpp 开关。
+
+下一阶段先实施 Tool Use Reliability v2，再实施验证器驱动的
+`fast -> code -> deep` 自适应升级；Q6_K 权重、MTP 复测、原生 `sm_120` 与引擎升级
+保持候选实验。完整优先级与门槛见
+[`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
 
 ## 复验命令
 

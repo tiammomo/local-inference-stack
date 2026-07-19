@@ -10,6 +10,7 @@ Qwen3.5-9B Q5_K_M / RTX 5070 Ti / 128K。
 - [Provider 契约](../contracts/local-qwen-provider-v1.json)：本项目与 ModelPort 的版本化能力边界。
 - [ARCHITECTURE.md](ARCHITECTURE.md)：目标、边界、架构和容量设计。
 - [OPTIMIZATION.md](OPTIMIZATION.md)：优化参数、A/B 数据、适用边界和后续候选。
+- [ENHANCEMENT_ROADMAP.md](ENHANCEMENT_ROADMAP.md)：推理增强、Tool Use Reliability v2、指标口径和分层实施顺序。
 - [DEPLOYMENT.md](DEPLOYMENT.md)：模型、镜像、启动和 ModelPort 上线步骤。
 - [MODELPORT.md](MODELPORT.md)：ModelPort 路由配置和调用方式。
 - [OPERATIONS.md](OPERATIONS.md)：日常启停、监控、升级和故障处理。
@@ -38,3 +39,4 @@ Qwen3.5-9B Q5_K_M / RTX 5070 Ti / 128K。
 - 端口：Qwen 直连诊断 `127.0.0.1:18080`；ModelPort `127.0.0.1:38082`。
 - 已淘汰：当前后端上的 q4 KV、非精确 cache reuse 和 MTP 默认启用，具体 A/B 见优化文档。
 - Profile：默认 `latency` 为单 Slot 128K；可选 `throughput` 为双 Slot 64K，双请求聚合吞吐约提升 67.9%。
+- 下一阶段：优先完成完整 Tool Schema 校验、闭环工作流指标和验证器驱动的自适应推理；Q6_K、MTP 和原生构建继续作为候选 A/B，不直接进入生产。
