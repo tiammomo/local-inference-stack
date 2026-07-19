@@ -63,7 +63,7 @@
 | 合成质量门禁 | 通过 | 10 个 Case × 3 次，共 30/30；覆盖推理、指令、抽取、JSON、代码、多语言和 Tool Use |
 | Tool Use 结果观测 | 通过 | 请求级区分 `tool_called/final_answer/answered_without_tool/completed_unobserved` 与错误终态；不保留工具内容 |
 | 持久化错误脱敏 | 通过 | usage、request/attempt ledger、Provider/credential health 只保留错误类别；迁移 4 已重写 25 条 request、22 条 attempt 与 96 条 usage 历史错误，Schema 路径和高置信度 token 痕迹均为 0 |
-| 凭证与权限复核 | 通过 | Git 当前树与完整历史未发现高置信度私钥/API Key；`.env`、`.env.backup-*`、`operations.secrets.env` 均为 `0600` 且未跟踪；无密钥的只读 `config.toml` 为容器可读的 `0644` |
+| 凭证与权限复核 | 通过 | Gitleaks v8.30.1 扫描两个仓库完整 Git 历史均为 0 findings；`.env`、`.env.backup-*`、`operations.secrets.env` 均为 `0600` 且未跟踪；无密钥的只读 `config.toml` 为容器可读的 `0644` |
 | 聚合时序历史 | 通过 | SQLite `0600`；24h 原始、30d 分钟和 365d 小时保留；WebSocket 查询按窗口自动选分辨率 |
 | 启动自愈 | 通过 | `qwen-model-runtime.service` 已 enabled/active；健康时幂等退出，缺失时等待 ModelPort network 后恢复 |
 | Runtime 最小权限 | 通过 | UID/GID `1000:1000`、只读根文件系统、drop ALL、no-new-privileges、仅回环端口 |
