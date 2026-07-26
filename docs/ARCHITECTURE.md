@@ -6,8 +6,9 @@
 Qwen3.5-9B Q5_K_M 服务，并通过 ModelPort 暴露 Anthropic 兼容接口。
 
 本阶段包含文本推理、128K 上下文、默认启用的 Reasoning、OpenAI 兼容 API、
-ModelPort 路由和监控。视觉投影器会下载并校验，但基线服务不加载；
-MTP 和公网服务不启用；双 Slot 仅作为显式 `throughput` profile，不是生产默认。
+ModelPort 路由和监控。视觉投影器不在通用 Catalog 中自动下载，历史制品也不由
+文本基线加载；启用视觉必须建立独立 Profile、来源和验收。MTP 和公网服务不启用；
+双 Slot 仅作为显式 `throughput` profile，不是生产默认。
 
 ## 请求路径
 

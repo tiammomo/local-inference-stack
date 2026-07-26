@@ -9,11 +9,12 @@
 已有控制：
 
 - llama.cpp 镜像固定 digest；
-- GGUF 固定 HTTPS 来源、字节数和 SHA256；
+- GGUF 固定模型/GGUF 仓库 commit、HTTPS 来源、字节数和 SHA256；
 - `.part` 校验成功后原子发布；
 - `plan` 默认只读，所有下载和选择都要求显式 `--yes`；
 - 模型、缓存、日志、本地 Profile 和凭证由 `.gitignore` 排除；
-- 服务绑定 loopback；容器非 root、只读根文件系统、`cap_drop: ALL`、
+- Compose 发布地址结构化固定为 `127.0.0.1`，Profile 只能选择端口；容器非 root、
+  只读根文件系统、`cap_drop: ALL`、
   `no-new-privileges`；
 - systemd 使用当前 checkout 渲染，不在仓库记录用户名或绝对家目录；
 - quick 验收无需读取 ModelPort 密钥；运营密钥只最小化复制到本地 `0600` 文件。
@@ -38,6 +39,14 @@ git grep -nE '(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A
 
 如环境安装了 Gitleaks，应对完整历史运行 `gitleaks git --redact --no-banner`。任何命中
 都必须逐项确认；不能只靠“当前文件已删除”。
+
+CI 使用固定 digest 的 Gitleaks，并按 Python 3.10/3.12/3.14 运行兼容性测试。每周和
+手工工作流还会执行只读上游 provenance 检查，确认 Catalog 固定的 Hugging Face
+revision 与 LFS SHA256 仍一致：
+
+```bash
+./scripts/model-manager.py audit-sources --json
+```
 
 ## 发布结论用语
 

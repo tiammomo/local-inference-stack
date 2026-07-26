@@ -11,15 +11,20 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 2. Run `./scripts/model-manager.py plan --json`. This is the only default
    first-run command: it is read-only and reports detected hardware,
    prerequisites, recommendation status, size, and next commands.
-3. Show the user the selected model, `evidenceStatus`, download size, source,
-   SHA256 policy, context, and caveats. Do not download, select, start, stop, or
-   install services until the user explicitly approves those state changes.
+3. Show the user the selected model, `evidenceStatus`, `hostAcceptanceStatus`,
+   download size, immutable source revision, license metadata, SHA256 policy,
+   context, current free VRAM, and caveats. Do not download, select, start, stop,
+   or install services until the user explicitly approves those state changes.
 4. After approval, use only catalog-backed commands with `--yes`; never invent a
    filename, URL, hash, hardware threshold, or unreviewed model entry.
 5. Run `./scripts/acceptance-suite.sh quick` after deployment. A recommendation
    marked `estimated` remains a candidate until it passes acceptance on that host.
 6. Record genuinely reusable host validation as a deployment manifest under
    `deployments/`; do not relabel estimates as validated.
+7. Treat `validated-on-this-host` as valid only when `hostAcceptanceEvidence`
+   points to a fresh, secure, matching schema v3 record. Hardware-profile
+   similarity alone is not host acceptance, and a busy running GPU may still
+   make `readyToDeploy` false.
 
 ## Safety and boundaries
 
@@ -32,6 +37,8 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 - Automation currently supports Linux/WSL x86_64 NVIDIA CUDA hosts. For CPU,
   Apple Silicon, AMD, unusual multi-GPU, or shared production GPUs, stop after
   the plan and design a reviewed profile rather than forcing this Compose stack.
+- `readyToDeploy=false` or an empty `nextCommands` list is a hard stop. Do not
+  work around free-VRAM, multi-GPU, platform, or prerequisite admission checks.
 - Keep services loopback-bound. Do not expose port `18080` or the operations
   dashboard without adding authentication and a separate security review.
 

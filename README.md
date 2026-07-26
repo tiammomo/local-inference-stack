@@ -14,7 +14,7 @@ reviewed local model with pinned artifacts and repeatable acceptance.
 
 - 只读硬件探测和机器可读推荐结果；
 - 面向 2–32GB NVIDIA 显存的 Qwen3.5 GGUF 候选目录；
-- 固定 URL、字节数和 SHA256 的可续传下载；
+- 固定上游 commit、URL、字节数和 SHA256 的可续传下载；
 - 经过安全收敛的 llama.cpp CUDA Compose 运行时；
 - 思考模式、长上下文、质量、性能和 Tool Use 验收；
 - 可选的 ModelPort Anthropic Messages 接入与实时运行台；
@@ -39,7 +39,9 @@ cd local-inference-stack
 ./scripts/model-manager.py plan --json   # 推荐给 Agent 使用
 ```
 
-确认输出中的模型状态、大小、来源、许可证和硬件余量后，才执行有副作用的步骤：
+确认输出中的模型状态、硬件档位匹配、本机验收状态、大小、不可变来源 revision、
+许可证元数据和当前空闲显存后，才执行有副作用的步骤。只有
+`readyToDeploy=true` 且 `nextCommands` 非空时才能继续：
 
 ```bash
 MODEL_ID=qwen35-9b-q5km  # 使用 plan 实际给出的 id
@@ -51,6 +53,13 @@ MODEL_ID=qwen35-9b-q5km  # 使用 plan 实际给出的 id
 
 `download` 会先写入 `.part`，校验精确大小和 SHA256 后才原子替换为正式权重。
 模型、缓存、日志、生成 Profile 和凭证均不会进入 Git。
+
+`quick` 会先验证活动权重，再生成权限 `0600` 的 schema v3 本机验收凭证。凭证使用
+应用域隔离的机器 ID 哈希区分同规格主机，不保存原始机器 ID；同时绑定 quick
+完整依赖集并设置 30 天有效期。后续只读 `plan` 只有在主机指纹、GPU/驱动、制品、
+镜像和关键配置哈希全部匹配，且文件所有权、权限、自校验和新鲜度均通过时，才返回
+`hostAcceptanceStatus=passed-current-configuration`；生产运行占用显存时仍会保持
+`readyToDeploy=false`，避免把“已经运行”误判为“适合再启动一份”。
 
 ## 硬件推荐档位
 
@@ -64,8 +73,8 @@ MODEL_ID=qwen35-9b-q5km  # 使用 plan 实际给出的 id
 | 22GB | Qwen3.5-27B | Q4_K_M | 32K | 估算 |
 | 28GB | Qwen3.5-35B-A3B | Q4_K_M | 32K | 估算 |
 
-推荐同时检查 RAM 和磁盘，不只看显存。多 GPU、CPU、Apple Silicon、AMD 和共享
-GPU 暂不自动部署；详见 [硬件与模型选择](docs/HARDWARE_GUIDE.md)。完整数据以
+推荐同时检查空闲显存、RAM 和磁盘，不只看标称显存。多 GPU、CPU、Apple Silicon、
+AMD 和共享 GPU 暂不自动部署；详见 [硬件与模型选择](docs/HARDWARE_GUIDE.md)。完整数据以
 [`catalog/models.json`](catalog/models.json) 为准，表格不是独立配置源。
 
 ## 使用接口
@@ -100,8 +109,9 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 ## Agent 操作契约
 
 [`AGENTS.md`](AGENTS.md) 是克隆后 Agent 的入口：默认只能运行只读 `plan --json`；
-必须先向用户展示下载大小、来源和候选状态，获得明确批准后才能使用 `--yes`。任何
-未列入 Catalog 或未经目标机验收的配置，都不能声称“已验证”。
+必须先向用户展示下载大小、不可变来源、许可证、硬件档位匹配与本机验收状态，获得
+明确批准后才能使用 `--yes`。硬件档位匹配不等于本机已通过验收；任何未列入 Catalog
+或未经目标机验收的配置，都不能声称“已验证”。
 
 ## English quick start
 

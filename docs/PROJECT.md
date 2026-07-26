@@ -67,13 +67,12 @@ ModelPort 负责 Anthropic/OpenAI 边界、认证、路由、配额、账本和�
 质量集和独立候选发布入口。后续 P1 工作主要是积累真实失败模式并扩展合成回归，不再
 以增加无证据的运行参数为目标。
 
-### P1.1：推理与 Tool Use 可靠性（已规划）
+### P1.1：推理与 Tool Use 可靠性（协议与闭环基础已完成）
 
-1. ModelPort 对模型生成的工具参数执行完整 JSON Schema 校验。
-2. 将请求成功、模型调用、Schema 通过、Tool Result 续接和最终任务成功拆成独立指标。
-3. 用 40--60 个闭环 Case 覆盖多工具、多步、错误恢复、流式与注入场景。
-4. 使用验证器驱动的 `fast -> code -> deep` 升级，避免统一扩大思考预算。
-5. 建立真正的流式 TTFT、Reasoning/正文完成度和显式测试流量标签。
+1. 已完成完整 JSON Schema 校验、协议修复与分层 Tool Use 终态。
+2. 已完成 40 个闭环 Case、4 个韧性 Case、流式 TTFT 和显式测试流量标签。
+3. 待完成客户端放弃/过期状态和 Reasoning/正文 Token 拆分。
+4. 应用侧待实现验证器驱动的 `fast -> code -> deep` 升级。
 
 完整顺序、验收门槛和三层职责见
 [`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。

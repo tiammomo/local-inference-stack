@@ -16,8 +16,9 @@ MODEL_ID=qwen35-9b-q5km
 ./scripts/acceptance-suite.sh quick
 ```
 
-`catalog/models.json` 是模型 URL、文件名、精确字节数、SHA256、硬件门槛和默认运行
-参数的唯一配置源。不要把网页中的“latest”链接或未经固定的下载脚本加到部署流程。
+`catalog/models.json` 是模型/GGUF revision、许可证元数据、URL、文件名、精确字节数、
+SHA256、硬件门槛和默认运行参数的唯一配置源。不要把网页中的 `main`/`latest` 链接
+或未经固定的下载脚本加到部署流程。
 
 ## 运行物化
 
@@ -36,7 +37,7 @@ MODEL_ID=qwen35-9b-q5km
 - Q8_0 K/V Cache；
 - Jinja 与默认思考模式；
 - 只读根文件系统、非 root、无 Linux capabilities；
-- `127.0.0.1:18080` 诊断端口。
+- 结构化固定的 `127.0.0.1:18080` 诊断端口；Profile 不能改成非 loopback 地址。
 
 启动会创建缺失的 `${MODELPORT_NETWORK_NAME:-modelport_default}` Docker 网络。该网络
 只是稳定的可选集成面；ModelPort 不再是本地模型启动的前置条件。
@@ -48,6 +49,9 @@ RTX 5070 Ti 档案仍固定以下基线：
 | 制品 | 固定值 |
 | --- | --- |
 | 模型仓库 | `unsloth/Qwen3.5-9B-GGUF` |
+| 官方模型 revision | `c202236235762e1c871ad0ccb60c8ee5ba337b9a` |
+| GGUF revision | `3885219b6810b007914f3a7950a8d1b469d598a5` |
+| 上游许可证元数据 | `Apache-2.0`，仍要求使用前独立审查 |
 | 权重 | `Qwen3.5-9B-Q5_K_M.gguf` |
 | 权重 SHA256 | `dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c` |
 | llama.cpp OCI digest | `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8` |

@@ -66,11 +66,15 @@ scripts/release-candidate.sh quick
 scripts/release-candidate.sh long
 ```
 
-手工调试可使用 `candidate-runtime.sh start|accept|status|stop`；启动前必须先停止生产。
-候选使用独立的 `cache/candidate/`，不会污染生产 Prompt/KV Cache。生产停止期间，
+手工调试可使用 `candidate-runtime.sh start|accept|status|config|stop`；`config` 是
+只读 Compose 渲染，可用于确认候选 project、容器、端口和模型身份。启动前必须先停止
+生产。候选使用独立的 `cache/candidate/`，不会污染生产 Prompt/KV Cache。生产停止期间，
 候选临时接管内部 `qwen-runtime` alias，使 ModelPort、Tool Use、精确 Token、上下文
 准入和质量冒烟也测试候选本身，而不只是 `18081` 直连。完整日志以 `0600` 保存到
 `logs/releases/`。
+
+候选脚本先记录生产容器身份，再显式加载候选 Profile 覆盖 project、容器、端口和
+Cache。CI 会渲染最终 Compose JSON，防止 Shell 环境优先级把候选身份静默改回生产值。
 
 ## 晋级与回滚
 

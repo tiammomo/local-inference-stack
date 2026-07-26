@@ -35,13 +35,25 @@ scripts/acceptance-suite.sh standard
 scripts/acceptance-suite.sh full
 ```
 
-`quick` 是无密钥的独立部署门禁；`standard` 用于当前 9B Provider 的 ModelPort、
+`quick` 是无密钥的独立部署门禁，包含活动权重 SHA256、运行态、生成和默认思考；
+`standard` 用于当前 9B Provider 的 ModelPort、
 Token 和 Tool Use 协议变更，需要显式设置 `MODELPORT_PROJECT_DIR`；standard 会先
 执行机器可读跨仓库配置检查。`full` 用于模型、
 量化、KV、上下文、Slot、镜像或重大版本升级。三档都会 fail-fast 并执行真实调用。
 
 每次执行默认在 `logs/acceptance/` 保存权限为 `0600` 的文本日志和机器可读 JSON
-证据，记录模式、结果、耗时、Git commit、运行镜像和配置摘要；只使用合成验收流量。
+证据。schema v3 记录模式、结果、耗时、Git commit、GPU/驱动/RAM、模型与 GGUF
+revision、权重字节数/SHA256、运行镜像、quick 传递依赖哈希、自校验摘要和
+30 天新鲜度策略。应用域隔离的机器 ID SHA256 用于区分同规格主机；不保存原始
+machine-id、hostname、Prompt、回复、工具参数、凭证或容器原始环境。
+
+`model-manager.py plan` 会通过无符号链接安全读取只读扫描这些证据，但仅接受当前
+用户所有、权限 `0600`、单硬链接、正文自校验通过、时间不在未来且未超过 30 天的
+schema v3 记录。机器指纹、当前模型/制品/配置和 quick 传递依赖必须完全匹配，
+GPU 名称、数量、显存和驱动也必须一致。匹配时返回
+`hostAcceptanceStatus=passed-current-configuration` 和相对证据路径；旧 schema、
+过期/复制/宽权限记录、失败记录、驱动或配置漂移都会退回
+`not-evaluated-by-read-only-plan`。
 非当前 9B 已验证档位会把 manifest 标记为 `unvalidated-catalog-profile`，直到创建新的
 可复查部署档案，避免误用 5070 Ti 清单。
 临时调试时可加 `--no-record`。运行态与版本化部署清单的一致性使用：

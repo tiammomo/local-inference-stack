@@ -167,3 +167,25 @@ ModelPort 的 `POST /v1/messages/count_tokens` 现在使用上游 Qwen tokenizer
 2026-07-18 初始 64K/Q8_0 基线曾以 58,041 prompt tokens 在 17.91 秒内
 通过召回，峰值前整卡约占用 10.9GiB。同日按实测结果升级到
 128K/Q8_0，当前生效基线以上表为准。
+
+2026-07-26 完成部署控制面 fail-closed 加固：硬件规划新增逐卡空闲显存，自动推荐
+不再聚合多 GPU；硬件档位匹配与本机验收状态分离；Catalog 固定官方模型/GGUF
+revision 并记录 Apache-2.0 元数据；候选环境优先级回归已修复；Compose 宿主发布
+地址结构化固定为 `127.0.0.1`，显式 restart 重新加载权重前执行完整性校验。该变更
+不重建生产容器，不改变模型、KV、上下文、采样或 ModelPort 契约。最终静态发布门禁、
+14 项上游来源检查、102 项实时部署漂移检查和
+`logs/acceptance/20260726T095036Z-quick.json` 均通过。
+
+同日进一步启用 schema v2 主机验收凭证：
+`logs/acceptance/20260726T111243Z-quick.json` 在活动权重完整性、29 项单元测试、
+直连生成和默认思考全部通过后原子生成。凭证权限为 `0600`，不含 hostname 或请求
+内容；`plan` 已复验为 `validated-on-this-host` /
+`passed-current-configuration`。实时部署漂移检查同步扩展为 103/103。
+
+随后升级到 schema v3：
+`logs/acceptance/20260726T121722Z-quick.json` 在活动权重完整性、34 项单元测试、
+直连生成和默认思考全部通过后生成。凭证新增应用域机器指纹、13 项当前配置与 quick
+传递依赖哈希、正文自校验和 30 天新鲜度门禁；文件为当前用户所有的 `0600`
+单硬链接普通文件，不保存原始 machine-id。旧 v2 先被只读 `plan` 自动拒绝，新 v3
+再复验为 `validated-on-this-host` / `passed-current-configuration`，证明迁移门禁
+实际生效。生产容器未停止、重启或重建。

@@ -31,16 +31,21 @@ docker compose version
 ./scripts/model-manager.py plan --json
 ```
 
-`plan` 读取 GPU、显存、RAM、磁盘与 Docker 状态，不联网、不写文件、不拉镜像、
+`plan` 读取 GPU 总量/空闲显存、RAM、磁盘与 Docker 状态，不联网、不写文件、不拉镜像、
 不下载权重。Agent 应把 JSON 中以下字段展示给用户：
 
-- `recommendation.id`、`displayName`、`status` 与主机专属的 `evidenceStatus`；
+- `recommendation.id`、`displayName`、`status`、`modelRevision`、
+  `artifactRevision` 与 `license`；
+- `evidenceStatus`、`catalogEvidenceStatus`、`hardwareProfileMatch` 与
+  `hostAcceptanceStatus`、`hostAcceptanceEvidence`；硬件档位匹配不等于本机验收通过；
 - `requirements` 与 `runtime`；
 - 主权重的 `bytes`、`url`、`sha256`；
-- `fits`、`caveats` 和 `nextCommands`。
+- `fits`、`resourceAvailableNow`、`automaticDeploymentSupported`、
+  `readyToDeploy`、`caveats` 和 `nextCommands`。
 
-如果 `recommendation` 为 `null`，不要强行部署。当前自动化不覆盖无 NVIDIA GPU、
-少于 2GB 显存或异常平台。
+如果 `recommendation` 为 `null`、`readyToDeploy=false` 或 `nextCommands` 为空，
+不要强行部署。当前自动化不覆盖无 NVIDIA GPU、少于 2GB 显存、忙碌/共享 GPU、
+多 GPU 或异常平台。
 
 ## 3. 审批后下载与选择
 
@@ -52,8 +57,9 @@ MODEL_ID=qwen35-9b-q5km
 ./scripts/model-manager.py verify --cached
 ```
 
-下载只处理 Catalog 中的 HTTPS URL。中断后保留 `.part` 供续传；只有字节数和 SHA256
-完全匹配才会原子发布。`select` 仅写入权限为 `0600` 且被 Git 忽略的
+下载只处理 Catalog 中固定到上游 commit 的 Hugging Face HTTPS URL。中断后保留
+`.part` 供续传；只有字节数和 SHA256 完全匹配才会原子发布。`select` 仅写入权限为
+`0600` 且被 Git 忽略的
 `profiles/deployment.local.env`，不包含 Token。
 
 第三方 GGUF 由 Catalog 的 `artifactPublisher` 发布。部署前仍需核对模型作者、制品
@@ -68,7 +74,10 @@ MODEL_ID=qwen35-9b-q5km
 ```
 
 启动会幂等创建共享 Docker 网络，但不会安装或启动 ModelPort。直连接口固定绑定
-`127.0.0.1:18080`。`quick` 包含单元测试、运行态、生成和思考模式，不需要密钥。
+`127.0.0.1:18080`。`quick` 包含活动权重完整性、单元测试、运行态、生成和思考模式，
+不需要密钥。它还会生成 schema v3 本机证据；证据只在应用域机器指纹、当前
+GPU/驱动、模型、镜像与 quick 全部依赖哈希匹配，文件为当前用户所有的单硬链接
+`0600` 普通文件、自校验正确且未超过 30 天时，才被后续 `plan` 接受。
 
 如果是 `estimated` 候选，重点观察：
 
