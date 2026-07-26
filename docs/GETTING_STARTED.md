@@ -8,7 +8,7 @@
 - Linux/WSL x86_64 NVIDIA 主机；
 - NVIDIA 驱动与 Container Toolkit；
 - Docker Engine、Docker Compose v2；
-- Python 3.10+、`curl` 和足够磁盘。
+- Python 3.11+、`curl` 和足够磁盘。
 
 ```bash
 nvidia-smi

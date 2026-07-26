@@ -9,7 +9,7 @@ Q8_0 KV。其他 Catalog 条目是保守估算，必须在目标主机重新验�
 ## 快速开始
 
 要求：Linux/WSL x86_64、NVIDIA GPU/驱动、NVIDIA Container Toolkit、
-Docker Compose v2、Python 3.10+ 和 `curl`。
+Docker Compose v2、Python 3.11+ 和 `curl`。
 
 ```bash
 git clone git@github.com:tiammomo/local-inference-stack.git
