@@ -58,6 +58,7 @@ case "$ACTION" in
     compose stop
     ;;
   restart)
+    "$ROOT_DIR/scripts/verify-models.sh" --active --cached
     compose restart qwen35
     ;;
   status)

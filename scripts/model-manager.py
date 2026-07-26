@@ -10,9 +10,11 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -23,12 +25,25 @@ CATALOG_PATH = ROOT_DIR / "catalog" / "models.json"
 LOCAL_PROFILE = ROOT_DIR / "profiles" / "deployment.local.env"
 MODELS_DIR = ROOT_DIR / "models"
 INTEGRITY_DIR = ROOT_DIR / "cache" / "integrity"
+ACCEPTANCE_DIR = ROOT_DIR / "logs" / "acceptance"
+MANIFEST_PATH = (
+    ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.json"
+)
+ACCEPTANCE_SCHEMA_VERSION = 3
+ACCEPTANCE_MAX_AGE = timedelta(days=30)
+ACCEPTANCE_FUTURE_SKEW = timedelta(seconds=300)
+HOST_FINGERPRINT_TYPE = "machine-id-sha256-v1"
+HOST_FINGERPRINT_CONTEXT = b"local-inference-stack.acceptance-host.v1\0"
+MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 
 
 def load_catalog() -> dict[str, Any]:
     catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
     if catalog.get("schemaVersion") != 1 or not catalog.get("models"):
         raise SystemExit(f"unsupported or empty catalog: {CATALOG_PATH}")
+    policy = catalog.get("artifactPolicy", {})
+    if policy.get("licenseReviewRequired") is not True:
+        raise SystemExit("catalog must require an explicit third-party license review")
     ids: set[str] = set()
     for model in catalog["models"]:
         model_id = model.get("id", "")
@@ -38,6 +53,65 @@ def load_catalog() -> dict[str, Any]:
         directory = Path(model.get("modelDirectory", ""))
         if directory.is_absolute() or ".." in directory.parts or len(directory.parts) != 1:
             raise SystemExit(f"unsafe model directory for {model_id}: {directory}")
+        if model.get("status") not in {"estimated", "validated"}:
+            raise SystemExit(f"invalid evidence status for {model_id}: {model.get('status')!r}")
+        for revision_field in ("modelRevision", "artifactRevision"):
+            if not re.fullmatch(r"[0-9a-f]{40}", model.get(revision_field, "")):
+                raise SystemExit(f"invalid {revision_field} for {model_id}")
+        for repository_field in ("modelRepository", "artifactRepository"):
+            if not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                model.get(repository_field, ""),
+            ):
+                raise SystemExit(f"invalid {repository_field} for {model_id}")
+        license_metadata = model.get("license", {})
+        expected_license_source = (
+            f"https://huggingface.co/{model.get('modelRepository', '')}/blob/"
+            f"{model.get('modelRevision', '')}/LICENSE"
+        )
+        if (
+            not re.fullmatch(r"[A-Za-z0-9.+-]+", license_metadata.get("spdx", ""))
+            or license_metadata.get("source") != expected_license_source
+            or license_metadata.get("reviewRequired") is not True
+            or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}", license_metadata.get("metadataVerifiedAt", "")
+            )
+        ):
+            raise SystemExit(f"incomplete license metadata for {model_id}")
+        requirements = model.get("requirements", {})
+        required_capacity = (
+            "minVramGiB",
+            "recommendedVramGiB",
+            "minRamGiB",
+            "minFreeDiskGiB",
+        )
+        if any(
+            not isinstance(requirements.get(field), (int, float))
+            or requirements[field] <= 0
+            for field in required_capacity
+        ):
+            raise SystemExit(f"invalid hardware requirements for {model_id}")
+        if requirements["recommendedVramGiB"] < requirements["minVramGiB"]:
+            raise SystemExit(f"recommended VRAM is below minimum for {model_id}")
+        runtime = model.get("runtime", {})
+        runtime_fields = (
+            "contextTokens",
+            "recommendedInputTokens",
+            "maxOutputTokens",
+            "cacheRamMiB",
+            "batchSize",
+            "ubatchSize",
+        )
+        if any(
+            not isinstance(runtime.get(field), int) or runtime[field] <= 0
+            for field in runtime_fields
+        ):
+            raise SystemExit(f"invalid runtime capacity for {model_id}")
+        if (
+            runtime["recommendedInputTokens"] + runtime["maxOutputTokens"]
+            >= runtime["contextTokens"]
+        ):
+            raise SystemExit(f"runtime token budget has no safety margin for {model_id}")
         primaries = [item for item in model.get("artifacts", []) if item.get("role") == "model"]
         if len(primaries) != 1:
             raise SystemExit(f"{model_id} must define exactly one primary model artifact")
@@ -48,10 +122,21 @@ def load_catalog() -> dict[str, Any]:
                 raise SystemExit(f"unsafe artifact filename for {model_id}: {filename}")
             if url.scheme != "https" or url.hostname != "huggingface.co":
                 raise SystemExit(f"unapproved artifact URL for {model_id}: {url.geturl()}")
+            expected_path = (
+                f"/{model['artifactRepository']}/resolve/"
+                f"{model['artifactRevision']}/{filename}"
+            )
+            if url.path != expected_path:
+                raise SystemExit(
+                    f"artifact URL is not pinned to the reviewed revision for "
+                    f"{model_id}/{filename}"
+                )
             if not re.fullmatch(r"[0-9a-f]{64}", artifact.get("sha256", "")):
                 raise SystemExit(f"invalid SHA256 for {model_id}/{filename}")
             if not isinstance(artifact.get("bytes"), int) or artifact["bytes"] <= 0:
                 raise SystemExit(f"invalid artifact size for {model_id}/{filename}")
+    if catalog.get("defaultModel") not in ids:
+        raise SystemExit("catalog defaultModel does not reference a reviewed entry")
     return catalog
 
 
@@ -87,7 +172,7 @@ def gpu_inventory() -> list[dict[str, Any]]:
     output = command_output(
         [
             "nvidia-smi",
-            "--query-gpu=index,name,memory.total,driver_version",
+            "--query-gpu=index,name,memory.total,memory.free,driver_version",
             "--format=csv,noheader,nounits",
         ]
     )
@@ -95,11 +180,12 @@ def gpu_inventory() -> list[dict[str, Any]]:
         return []
     gpus: list[dict[str, Any]] = []
     for line in output.splitlines():
-        fields = [field.strip() for field in line.split(",", 3)]
-        if len(fields) != 4:
+        fields = [field.strip() for field in line.split(",", 4)]
+        if len(fields) != 5:
             continue
         try:
             memory_gib = round(float(fields[2]) / 1024, 1)
+            free_memory_gib = round(float(fields[3]) / 1024, 1)
         except ValueError:
             continue
         gpus.append(
@@ -107,7 +193,8 @@ def gpu_inventory() -> list[dict[str, Any]]:
                 "index": int(fields[0]),
                 "name": fields[1],
                 "vramGiB": memory_gib,
-                "driver": fields[3],
+                "freeVramGiB": free_memory_gib,
+                "driver": fields[4],
             }
         )
     return gpus
@@ -116,7 +203,15 @@ def gpu_inventory() -> list[dict[str, Any]]:
 def host_assessment(vram_override: float | None, ram_override: float | None) -> dict[str, Any]:
     gpus = gpu_inventory()
     if vram_override is not None:
-        gpus = [{"index": 0, "name": "override", "vramGiB": vram_override, "driver": "override"}]
+        gpus = [
+            {
+                "index": 0,
+                "name": "override",
+                "vramGiB": vram_override,
+                "freeVramGiB": vram_override,
+                "driver": "override",
+            }
+        ]
     ram_gib = ram_override if ram_override is not None else total_ram_gib()
     disk = shutil.disk_usage(ROOT_DIR)
     docker_version = command_output(["docker", "version", "--format", "{{.Server.Version}}"])
@@ -128,6 +223,12 @@ def host_assessment(vram_override: float | None, ram_override: float | None) -> 
         "gpus": gpus,
         "totalVramGiB": round(sum(gpu["vramGiB"] for gpu in gpus), 1),
         "largestGpuVramGiB": max((gpu["vramGiB"] for gpu in gpus), default=0),
+        "totalFreeVramGiB": round(
+            sum(gpu.get("freeVramGiB", gpu["vramGiB"]) for gpu in gpus), 1
+        ),
+        "largestFreeVramGiB": max(
+            (gpu.get("freeVramGiB", gpu["vramGiB"]) for gpu in gpus), default=0
+        ),
         "ramGiB": round(ram_gib, 1),
         "freeDiskGiB": round(disk.free / 1024**3, 1),
         "docker": {"available": docker_version is not None, "version": docker_version},
@@ -141,10 +242,22 @@ def fits(model: dict[str, Any], host: dict[str, Any]) -> bool:
     return (
         host.get("platform", "linux") == "linux"
         and host.get("architecture", "x86_64") in {"x86_64", "amd64"}
-        and host["totalVramGiB"] >= requirements["minVramGiB"]
+        and host["largestGpuVramGiB"] >= requirements["minVramGiB"]
         and host["ramGiB"] >= requirements["minRamGiB"]
         and host["freeDiskGiB"] >= requirements["minFreeDiskGiB"]
     )
+
+
+def resources_available_now(model: dict[str, Any], host: dict[str, Any]) -> bool:
+    return (
+        fits(model, host)
+        and host.get("largestFreeVramGiB", host["largestGpuVramGiB"])
+        >= model["requirements"]["minVramGiB"]
+    )
+
+
+def automatic_deployment_supported(host: dict[str, Any]) -> bool:
+    return len(host["gpus"]) == 1
 
 
 def recommend(catalog: dict[str, Any], host: dict[str, Any]) -> dict[str, Any] | None:
@@ -154,7 +267,9 @@ def recommend(catalog: dict[str, Any], host: dict[str, Any]) -> dict[str, Any] |
     return max(candidates, key=lambda model: model["requirements"]["minVramGiB"])
 
 
-def validated_on_host(model: dict[str, Any] | None, host: dict[str, Any]) -> bool:
+def matches_validated_hardware_profile(
+    model: dict[str, Any] | None, host: dict[str, Any]
+) -> bool:
     if not model or model.get("status") != "validated" or "validatedHardware" not in model:
         return False
     signature = model["validatedHardware"]
@@ -166,12 +281,19 @@ def validated_on_host(model: dict[str, Any] | None, host: dict[str, Any]) -> boo
     )
 
 
-def caveats(host: dict[str, Any], model: dict[str, Any] | None) -> list[str]:
+def caveats(
+    host: dict[str, Any],
+    model: dict[str, Any] | None,
+    host_acceptance: dict[str, Any] | None = None,
+) -> list[str]:
     notes: list[str] = []
     if not host["gpus"]:
         notes.append("No NVIDIA GPU was detected; automatic deployment is intentionally disabled.")
     if len(host["gpus"]) > 1:
-        notes.append("Multi-GPU capacity is an estimate; review tensor split and interconnect before deploy.")
+        notes.append(
+            "Multi-GPU automatic deployment is disabled; design and validate a reviewed "
+            "tensor-split profile before changing runtime state."
+        )
     if not host["docker"]["available"]:
         notes.append("Docker Engine is unavailable.")
     if not host["dockerCompose"]["available"]:
@@ -180,19 +302,284 @@ def caveats(host: dict[str, Any], model: dict[str, Any] | None) -> list[str]:
         notes.append("Docker does not report an NVIDIA container runtime.")
     if host.get("platform") != "linux" or host.get("architecture") not in {"x86_64", "amd64"}:
         notes.append("Automatic deployment currently supports Linux/WSL x86_64 only.")
-    if model and not validated_on_host(model, host):
-        notes.append("This exact host is not a recorded validation signature; treat the profile as estimated until acceptance passes.")
+    if (
+        model
+        and matches_validated_hardware_profile(model, host)
+        and not host_acceptance
+    ):
+        notes.append(
+            "This hardware matches a recorded validated profile, but a read-only plan "
+            "does not prove that this host has passed acceptance."
+        )
+    elif model and not matches_validated_hardware_profile(model, host):
+        notes.append(
+            "This hardware does not match a recorded validation profile; treat the "
+            "candidate as estimated until host acceptance passes."
+        )
     if model and host["largestGpuVramGiB"] < model["requirements"]["minVramGiB"]:
-        notes.append("No single GPU meets the minimum; this recommendation assumes reviewed multi-GPU offload.")
+        notes.append(
+            "No single GPU meets the minimum; automatic deployment will not aggregate "
+            "VRAM across GPUs."
+        )
+    if model and fits(model, host) and not resources_available_now(model, host):
+        notes.append(
+            f"Largest free VRAM ({host.get('largestFreeVramGiB', 0):.1f} GiB) is below "
+            f"the {model['requirements']['minVramGiB']} GiB deployment threshold; "
+            "stop or review existing GPU workloads before deployment."
+        )
     return notes
 
 
-def plan_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> dict[str, Any]:
-    host = host_assessment(args.vram_gib, args.ram_gib)
+def acceptance_configuration(model: dict[str, Any]) -> dict[str, str]:
+    paths = {
+        "composeSha256": ROOT_DIR / "compose.yaml",
+        "contractSha256": ROOT_DIR / "contracts" / "local-qwen-provider-v1.json",
+        "catalogSha256": CATALOG_PATH,
+        "modelManagerSha256": ROOT_DIR / "scripts" / "model-manager.py",
+        "acceptanceSuiteSha256": ROOT_DIR / "scripts" / "acceptance-suite.sh",
+        "acceptanceEvidenceWriterSha256": (
+            ROOT_DIR / "scripts" / "acceptance-evidence.py"
+        ),
+        "deploymentLibrarySha256": ROOT_DIR / "scripts" / "lib" / "deployment.sh",
+        "unitTestsSha256": ROOT_DIR / "scripts" / "unit-tests.sh",
+        "verifyModelsSha256": ROOT_DIR / "scripts" / "verify-models.sh",
+        "runtimeControllerSha256": ROOT_DIR / "scripts" / "runtime.sh",
+        "smokeTestSha256": ROOT_DIR / "scripts" / "smoke-test.sh",
+        "reasoningSmokeSha256": ROOT_DIR / "scripts" / "reasoning-smoke.sh",
+    }
+    configuration = {key: sha256(path) for key, path in paths.items()}
+    configuration["manifestSha256"] = (
+        sha256(MANIFEST_PATH)
+        if model["id"] == "qwen35-9b-q5km"
+        else "unvalidated-catalog-profile"
+    )
+    return configuration
+
+
+def payload_sha256(payload: dict[str, Any]) -> str:
+    unsigned = {
+        key: value for key, value in payload.items() if key != "selfSha256"
+    }
+    canonical = json.dumps(
+        unsigned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def host_fingerprint(paths: tuple[Path, ...] = MACHINE_ID_PATHS) -> str | None:
+    for path in paths:
+        try:
+            machine_id = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if machine_id and len(machine_id) <= 256:
+            return hashlib.sha256(
+                HOST_FINGERPRINT_CONTEXT + machine_id.encode("utf-8")
+            ).hexdigest()
+    return None
+
+
+def parse_evidence_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def configured_runtime_image() -> str | None:
+    try:
+        for line in (ROOT_DIR / "compose.yaml").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            stripped = line.strip()
+            if stripped.startswith("image:"):
+                return stripped.split(":", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def acceptance_matches_host(
+    model: dict[str, Any],
+    host: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if (
+        evidence.get("schemaVersion") != ACCEPTANCE_SCHEMA_VERSION
+        or evidence.get("status") != "passed"
+        or evidence.get("exitCode") != 0
+        or evidence.get("failedAtStep") is not None
+        or evidence.get("mode") not in {"quick", "standard", "full"}
+        or evidence.get("catalogModelId") != model["id"]
+        or evidence.get("selfSha256") != payload_sha256(evidence)
+    ):
+        return False
+    terminal_step = evidence.get("terminalStep")
+    duration = evidence.get("durationSeconds")
+    if (
+        not isinstance(terminal_step, str)
+        or not terminal_step
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration < 0
+    ):
+        return False
+    started_at = parse_evidence_time(evidence.get("startedAt"))
+    finished_at = parse_evidence_time(evidence.get("finishedAt"))
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if (
+        not started_at
+        or not finished_at
+        or started_at > finished_at
+        or abs((finished_at - started_at).total_seconds() - duration) > 5
+        or finished_at > current_time + ACCEPTANCE_FUTURE_SKEW
+        or current_time - finished_at > ACCEPTANCE_MAX_AGE
+        or evidence.get("freshnessPolicy")
+        != {"maxAgeDays": 30, "futureSkewSeconds": 300}
+    ):
+        return False
+    artifact = next(item for item in model["artifacts"] if item["role"] == "model")
+    recorded_artifact = evidence.get("artifact", {})
+    if (
+        recorded_artifact.get("filename") != artifact["filename"]
+        or recorded_artifact.get("bytes") != artifact["bytes"]
+        or recorded_artifact.get("sha256") != artifact["sha256"]
+        or recorded_artifact.get("modelRevision") != model["modelRevision"]
+        or recorded_artifact.get("artifactRevision") != model["artifactRevision"]
+        or recorded_artifact.get("integrityVerified") is not True
+    ):
+        return False
+    expected_configuration = acceptance_configuration(model)
+    recorded_configuration = evidence.get("configuration", {})
+    if any(
+        recorded_configuration.get(key) != value
+        for key, value in expected_configuration.items()
+    ):
+        return False
+    recorded_host = evidence.get("host", {})
+    current_fingerprint = host_fingerprint()
+    if (
+        recorded_host.get("platform") != host.get("platform")
+        or recorded_host.get("architecture") != host.get("architecture")
+        or recorded_host.get("ramGiB", 0) < model["requirements"]["minRamGiB"]
+        or host.get("ramGiB", 0) < model["requirements"]["minRamGiB"]
+        or recorded_host.get("fingerprintType") != HOST_FINGERPRINT_TYPE
+        or not current_fingerprint
+        or recorded_host.get("fingerprint") != current_fingerprint
+    ):
+        return False
+    current_gpus = sorted(host.get("gpus", []), key=lambda gpu: gpu["index"])
+    recorded_gpus = sorted(
+        recorded_host.get("gpus", []), key=lambda gpu: gpu["index"]
+    )
+    if len(current_gpus) != len(recorded_gpus):
+        return False
+    for current, recorded in zip(current_gpus, recorded_gpus, strict=True):
+        if (
+            current.get("index") != recorded.get("index")
+            or current.get("name") != recorded.get("name")
+            or current.get("driver") != recorded.get("driver")
+            or abs(current.get("vramGiB", 0) - recorded.get("vramGiB", 0)) > 0.2
+        ):
+            return False
+    runtime = evidence.get("runtime", {})
+    return bool(
+        runtime.get("configuredImage")
+        and runtime.get("configuredImage") == configured_runtime_image()
+        and runtime.get("imageId")
+    )
+
+
+def read_secure_evidence(path: Path) -> dict[str, Any] | None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or metadata.st_size > 1024 * 1024
+        ):
+            return None
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = None
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def discover_host_acceptance(
+    model: dict[str, Any] | None, host: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not model:
+        return None
+    try:
+        directory = ACCEPTANCE_DIR.lstat()
+        if (
+            not stat.S_ISDIR(directory.st_mode)
+            or stat.S_IMODE(directory.st_mode) & 0o077
+            or directory.st_uid != os.getuid()
+        ):
+            return None
+        candidates: list[tuple[int, Path]] = []
+        for path in ACCEPTANCE_DIR.iterdir():
+            metadata = path.lstat()
+            if (
+                path.suffix == ".json"
+                and stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size <= 1024 * 1024
+            ):
+                candidates.append((metadata.st_mtime_ns, path))
+    except OSError:
+        return None
+    for _, path in sorted(candidates, reverse=True):
+        evidence = read_secure_evidence(path)
+        if not evidence or evidence.get("evidenceId") != path.stem:
+            continue
+        if acceptance_matches_host(model, host, evidence):
+            return {
+                "status": "passed-current-configuration",
+                "evidence": str(path.relative_to(ROOT_DIR)),
+                "finishedAt": evidence.get("finishedAt"),
+                "mode": evidence.get("mode"),
+            }
+    return None
+
+
+def plan_for_host(
+    args: argparse.Namespace,
+    catalog: dict[str, Any],
+    host: dict[str, Any],
+    host_acceptance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     selected = model_by_id(catalog, args.model) if args.model else recommend(catalog, host)
     hardware_fits = bool(selected and fits(selected, host))
+    resources_available = bool(selected and resources_available_now(selected, host))
+    automatic_supported = automatic_deployment_supported(host)
+    hardware_profile_match = matches_validated_hardware_profile(selected, host)
     ready = bool(
         hardware_fits
+        and resources_available
+        and automatic_supported
         and host["docker"]["available"]
         and host["dockerCompose"]["available"]
         and host["nvidiaContainerRuntime"]
@@ -201,12 +588,42 @@ def plan_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> dict[str,
         "schemaVersion": 1,
         "mode": "read-only-plan",
         "catalogUpdatedAt": catalog["updatedAt"],
+        "artifactPolicy": catalog["artifactPolicy"],
         "host": host,
         "recommendation": selected,
-        "evidenceStatus": "validated-on-this-host" if validated_on_host(selected, host) else "estimated-on-this-host",
+        "evidenceStatus": (
+            "validated-on-this-host"
+            if host_acceptance
+            else (
+                "validated-hardware-profile-match"
+                if hardware_profile_match
+                else "estimated-on-this-host"
+            )
+        ),
+        "catalogEvidenceStatus": (
+            "validated-profile"
+            if selected and selected.get("status") == "validated"
+            else "estimated-profile"
+        ),
+        "hardwareProfileMatch": hardware_profile_match,
+        "hostAcceptancePolicy": {
+            "schemaVersion": ACCEPTANCE_SCHEMA_VERSION,
+            "maxAgeDays": int(ACCEPTANCE_MAX_AGE.total_seconds() // 86400),
+            "futureSkewSeconds": int(ACCEPTANCE_FUTURE_SKEW.total_seconds()),
+            "requiresMachineFingerprint": True,
+            "requiresSecureEvidenceFile": True,
+        },
+        "hostAcceptanceStatus": (
+            host_acceptance["status"]
+            if host_acceptance
+            else "not-evaluated-by-read-only-plan"
+        ),
+        "hostAcceptanceEvidence": host_acceptance,
         "fits": hardware_fits,
+        "resourceAvailableNow": resources_available,
+        "automaticDeploymentSupported": automatic_supported,
         "readyToDeploy": ready,
-        "caveats": caveats(host, selected),
+        "caveats": caveats(host, selected, host_acceptance),
         "nextCommands": (
             [
                 f"./scripts/model-manager.py download --model {selected['id']} --yes",
@@ -220,6 +637,13 @@ def plan_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> dict[str,
     }
 
 
+def plan_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> dict[str, Any]:
+    host = host_assessment(args.vram_gib, args.ram_gib)
+    selected = model_by_id(catalog, args.model) if args.model else recommend(catalog, host)
+    host_acceptance = discover_host_acceptance(selected, host)
+    return plan_for_host(args, catalog, host, host_acceptance)
+
+
 def print_plan(payload: dict[str, Any], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -228,7 +652,11 @@ def print_plan(payload: dict[str, Any], as_json: bool) -> None:
     print("Host assessment (read-only)")
     if host["gpus"]:
         for gpu in host["gpus"]:
-            print(f"  GPU {gpu['index']}: {gpu['name']} ({gpu['vramGiB']} GiB)")
+            print(
+                f"  GPU {gpu['index']}: {gpu['name']} "
+                f"({gpu['vramGiB']} GiB total / "
+                f"{gpu.get('freeVramGiB', gpu['vramGiB'])} GiB free)"
+            )
     else:
         print("  GPU: no NVIDIA GPU detected")
     print(f"  RAM: {host['ramGiB']} GiB; free disk: {host['freeDiskGiB']} GiB")
@@ -239,6 +667,23 @@ def print_plan(payload: dict[str, Any], as_json: bool) -> None:
             f"Recommendation: {recommendation['id']} [{payload['evidenceStatus']}] "
             f"ctx={recommendation['runtime']['contextTokens']} "
             f"(minimum {req['minVramGiB']} GiB VRAM / {req['minRamGiB']} GiB RAM)"
+        )
+        print(
+            f"  Evidence: catalog={payload['catalogEvidenceStatus']}; "
+            f"hostAcceptance={payload['hostAcceptanceStatus']}"
+        )
+        print(
+            f"  Provenance: model={recommendation['modelRevision']}; "
+            f"artifact={recommendation['artifactRevision']}; "
+            f"license={recommendation['license']['spdx']} "
+            f"(reviewRequired={str(recommendation['license']['reviewRequired']).lower()})"
+        )
+        print(
+            f"  Deployment admission: fits={str(payload['fits']).lower()}; "
+            f"resourcesAvailableNow={str(payload['resourceAvailableNow']).lower()}; "
+            f"automaticDeploymentSupported="
+            f"{str(payload['automaticDeploymentSupported']).lower()}; "
+            f"readyToDeploy={str(payload['readyToDeploy']).lower()}"
         )
     else:
         print("Recommendation: none; this catalog only automates NVIDIA CUDA hosts with >=2 GiB VRAM")
@@ -431,11 +876,121 @@ def list_models(catalog: dict[str, Any], as_json: bool) -> None:
         )
 
 
+def parse_http_headers(output: str) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw in output.splitlines():
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        headers[key.strip().lower()] = value.strip().strip('"')
+    return headers
+
+
+def audit_sources(catalog: dict[str, Any], as_json: bool) -> int:
+    checks: list[dict[str, Any]] = []
+    for model in catalog["models"]:
+        license_result = subprocess.run(
+            [
+                "curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--head",
+                "--max-time",
+                "30",
+                model["license"]["source"],
+            ],
+            capture_output=True,
+            text=True,
+        )
+        checks.append(
+            {
+                "kind": "official-model-license-document",
+                "modelId": model["id"],
+                "filename": "LICENSE",
+                "passed": license_result.returncode == 0,
+                "expectedRevision": model["modelRevision"],
+                "actualRevision": None,
+                "expectedSha256": None,
+                "actualSha256": None,
+                "error": license_result.stderr.strip() or None,
+            }
+        )
+        for artifact in model["artifacts"]:
+            result = subprocess.run(
+                [
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--show-error",
+                    "--head",
+                    "--max-time",
+                    "30",
+                    artifact["url"],
+                ],
+                capture_output=True,
+                text=True,
+            )
+            headers = parse_http_headers(result.stdout)
+            actual_revision = headers.get("x-repo-commit")
+            actual_sha256 = headers.get("x-linked-etag")
+            passed = (
+                result.returncode == 0
+                and actual_revision == model["artifactRevision"]
+                and actual_sha256 == artifact["sha256"]
+            )
+            checks.append(
+                {
+                    "kind": "gguf-artifact",
+                    "modelId": model["id"],
+                    "filename": artifact["filename"],
+                    "passed": passed,
+                    "expectedRevision": model["artifactRevision"],
+                    "actualRevision": actual_revision,
+                    "expectedSha256": artifact["sha256"],
+                    "actualSha256": actual_sha256,
+                    "error": result.stderr.strip() or None,
+                }
+            )
+    failed = [check for check in checks if not check["passed"]]
+    payload = {
+        "schemaVersion": 1,
+        "mode": "read-only-upstream-source-audit",
+        "status": "passed" if not failed else "failed",
+        "summary": {"passed": len(checks) - len(failed), "failed": len(failed)},
+        "checks": checks,
+    }
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        for check in checks:
+            marker = "PASS" if check["passed"] else "FAIL"
+            if check["kind"] == "official-model-license-document":
+                detail = f"revision={check['expectedRevision']} license=available"
+            else:
+                detail = (
+                    f"revision={check['actualRevision']} "
+                    f"sha256={check['actualSha256']}"
+                )
+            print(f"[{marker}] {check['modelId']}/{check['filename']}: {detail}")
+        print(
+            f"Upstream source audit {payload['status']}: "
+            f"{payload['summary']['passed']} passed, "
+            f"{payload['summary']['failed']} failed"
+        )
+    return 1 if failed else 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     list_parser = subparsers.add_parser("list", help="list reviewed catalog entries")
     list_parser.add_argument("--json", action="store_true")
+    audit_parser = subparsers.add_parser(
+        "audit-sources",
+        help="read-only network check of pinned revisions and Hugging Face LFS hashes",
+    )
+    audit_parser.add_argument("--json", action="store_true")
     plan_parser = subparsers.add_parser("plan", help="read-only host assessment and recommendation")
     plan_parser.add_argument("--model", help="evaluate an explicit catalog model")
     plan_parser.add_argument("--json", action="store_true")
@@ -459,6 +1014,8 @@ def main() -> int:
     catalog = load_catalog()
     if args.command == "list":
         list_models(catalog, args.json)
+    elif args.command == "audit-sources":
+        return audit_sources(catalog, args.json)
     elif args.command == "plan":
         print_plan(plan_payload(args, catalog), args.json)
     elif args.command == "download":

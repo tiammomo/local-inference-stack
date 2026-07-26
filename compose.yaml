@@ -29,7 +29,7 @@ services:
       - ${QWEN_MODEL_DIR:-./models/qwen3.5-9b}:/models:ro
       - ${QWEN_CACHE_DIR:-./cache}:/cache
     ports:
-      - "${QWEN_PUBLISH_ADDRESS:-127.0.0.1:18080}:8080"
+      - "127.0.0.1:${QWEN_PUBLISH_PORT:-18080}:8080"
     networks:
       default: {}
       modelport:

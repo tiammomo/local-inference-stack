@@ -3,11 +3,21 @@
   "deploymentId": "qwen3.5-9b-rtx5070ti-128k-q5km",
   "status": "active",
   "model": {
+    "catalogId": "qwen35-9b-q5km",
     "family": "Qwen3.5",
     "parameters": "9B",
     "format": "GGUF",
     "weightQuantization": "Q5_K_M",
-    "servedModelId": "qwen3.5-9b-q5km"
+    "servedModelId": "qwen3.5-9b-q5km",
+    "officialRepository": "Qwen/Qwen3.5-9B",
+    "modelRevision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "artifactRepository": "unsloth/Qwen3.5-9B-GGUF",
+    "artifactRevision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+    "artifactFilename": "Qwen3.5-9B-Q5_K_M.gguf",
+    "artifactBytes": 6577841376,
+    "artifactSha256": "dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c",
+    "licenseSpdx": "Apache-2.0",
+    "licenseReviewRequired": true
   },
   "runtime": {
     "engine": "llama.cpp",
@@ -75,15 +85,15 @@
     ]
   },
   "configuration": {
-    "composeSha256": "34385fce3bd22b22dceb1a4c6a9b157f777e00c723276192631d861a532948aa",
+    "composeSha256": "14b0b2482bf821d8bd29a113f23e535abffa935286822d6ccde5953b57fffaa4",
     "latencyProfileSha256": "d062afdafe4106735a7b9d3cb32122532688a74d9ac0eba8009413a90dbeb200",
-    "candidateProfileSha256": "a0665f70ef0f2568ce666b25a4442ac121728fd74f90c6111c61622b2deac2ca",
+    "candidateProfileSha256": "805da7d664e168859df6e17bb210343c6669affc5bca526d6848e94f105a0567",
     "providerContractSha256": "b20737ece26cc9bc0958ebc5282c56c4208830e5e3f90b8472e48ed08d40d295",
     "qualitySuiteSha256": "e7761e50bf98e6287749775b9834bee4f745d0df89a6a970f938655a3e9e0fdb",
-    "acceptanceSuiteSha256": "20387bc07b7d72894279910f548d2a1aac5d48928a42dcd55e505b2bcad000a2",
+    "acceptanceSuiteSha256": "c79d6c5ac14e2edaf53eb4d3c5ce812f4a1428cb9cb03ea273c255c98c577e73",
     "compatibilityCheckSha256": "818426008e62a73a51198da5ba6c635819ba9de0b6b8a1e0e671f9f353872148",
-    "modelCatalogSha256": "6c8b35888983a844e80dcf9b7c4765cb74564da00bbf54a94e62a32d926e8ed8",
-    "modelManagerSha256": "a610f7c4b0cb6cc639a715f924a7a0d0f35b8ee36e891aa1aebba59279da32be",
+    "modelCatalogSha256": "d3dc877bc234f701521cc6cd2e3925ea7992d563325f77c0ce22680fd1b280d4",
+    "modelManagerSha256": "234ec4eb962f8ee32a6a3c270936c431cba457b618d564afc9c17a59ec9022bc",
     "toolWorkflowSuiteSha256": "c6008e01efbd313c8d338c9f3c7e02cbaa6a5facac059efbdfe19d0492ad538a",
     "toolWorkflowHarnessSha256": "df02c22f8fa8e6e9bef7aa2c03b7d302177d0c8b4250d4cdfb847f7b753818d0",
     "toolResilienceSuiteSha256": "119ca7dbeacbc82b35c409154293f5d4baf6af01664701969bfe9d9300fcc219",
@@ -95,7 +105,14 @@
     "operationsReportSha256": "82c0b3ddd6638b35064324edac2256c72ba430e955f140ab5d69face4ad90e73",
     "backupOrchestratorSha256": "c0c342b6908fb92e35c3813db2e724c550cee96a6664241acaae0bcc986510ae",
     "soakCheckSha256": "9f4d6bbaa4362e3ab5f4ace4cd6ee673b86a4a533c17f2faf7420214f786d148",
-    "systemdInstallerSha256": "14f445e639ca050bee245cf4d6c01ab2d77be63844d7abb00346fb72c4426ad5"
+    "systemdInstallerSha256": "14f445e639ca050bee245cf4d6c01ab2d77be63844d7abb00346fb72c4426ad5",
+    "runtimeControllerSha256": "3d94317b375e786a0cbe06d0ca46e3c190e409f99479a40eee9028cc2c154e52",
+    "candidateRuntimeSha256": "193cf0d6f49f8cff34fb96cf3eb34ebdcf9bd809cff75ada543c2226bc5bff19",
+    "releaseCandidateSha256": "27f6f63c9c5834cfa9bdfae9144a76592e8ce0dceb209f849da65c61f4148494",
+    "releaseCheckSha256": "45565c2281a595b21710772e90a77b7f5982b2bb201c4f22acc01578dce9fe8d",
+    "deploymentLibrarySha256": "fb2abd7d8b4d9ee6eb7749d36835b5a232a29cc1c4c92f21edcc21f12a84a47b",
+    "deploymentVerifierSha256": "ced28731385564f762d0f890567a053e073f10aea0acf1e530700fada3fe15a1",
+    "acceptanceEvidenceWriterSha256": "951dc8b3eb1650af78a49e8d76f4a6c7f567271effd2cd118532d8767e0aab2c"
   },
   "quality": {
     "suite": "quality/cases.json",

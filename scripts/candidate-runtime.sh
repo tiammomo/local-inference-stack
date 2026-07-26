@@ -9,8 +9,16 @@ ACTION="${1:-status}"
 source "$ROOT_DIR/scripts/lib/deployment.sh"
 load_deployment_env "$ROOT_DIR"
 PRODUCTION_CONTAINER="$QWEN_CONTAINER_NAME"
-CANDIDATE_CONTAINER="qwen35-9b-candidate"
-CANDIDATE_URL="http://127.0.0.1:18081"
+
+# Candidate identity must override exported production values. Docker Compose
+# gives the calling shell precedence over --env-file, so only passing the file
+# would silently retain the production container name.
+set -a
+# shellcheck disable=SC1090
+source "$PROFILE_FILE"
+set +a
+CANDIDATE_CONTAINER="$QWEN_CONTAINER_NAME"
+CANDIDATE_URL="http://127.0.0.1:${QWEN_PUBLISH_PORT}"
 
 compose() {
   docker compose --env-file "$PROFILE_FILE" "$@"
@@ -71,11 +79,14 @@ case "$ACTION" in
     curl --noproxy '*' -fsS "$CANDIDATE_URL/health" || true
     printf '\n'
     ;;
+  config)
+    compose config --format json
+    ;;
   stop)
     compose down --remove-orphans
     ;;
   *)
-    printf 'Usage: %s {start|accept|status|stop}\n' "$0" >&2
+    printf 'Usage: %s {start|accept|status|config|stop}\n' "$0" >&2
     exit 2
     ;;
 esac

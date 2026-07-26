@@ -16,6 +16,7 @@ from urllib.request import urlopen
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.json"
 CONTRACT_PATH = ROOT_DIR / "contracts" / "local-qwen-provider-v1.json"
+CATALOG_PATH = ROOT_DIR / "catalog" / "models.json"
 CONTAINER_NAME = "qwen35-9b-q5km"
 MODELPORT_CONTAINER_NAME = "modelport-modelport-1"
 MODELPORT_POSTGRES_CONTAINER_NAME = "modelport-postgres-1"
@@ -54,6 +55,17 @@ def main() -> int:
     args = parse_args()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    catalog_model = next(
+        model
+        for model in catalog["models"]
+        if model["id"] == manifest["model"]["catalogId"]
+    )
+    catalog_artifact = next(
+        artifact
+        for artifact in catalog_model["artifacts"]
+        if artifact["role"] == "model"
+    )
     container = command_json("docker", "inspect", CONTAINER_NAME)[0]
     modelport_container = command_json(
         "docker", "inspect", MODELPORT_CONTAINER_NAME
@@ -82,6 +94,7 @@ def main() -> int:
         )
 
     runtime = manifest["runtime"]
+    model = manifest["model"]
     gateway = manifest["gateway"]
     interfaces = manifest["interfaces"]
     configuration = manifest["configuration"]
@@ -93,6 +106,32 @@ def main() -> int:
     check("ModelPort live", modelport_health.get("status"), "ok")
     check("operations dashboard", dashboard_health.get("status"), "ok")
     check("runtime model alias", props.get("model_alias"), manifest["model"]["servedModelId"])
+    check("catalog model ID", catalog_model["id"], model["catalogId"])
+    check(
+        "official model repository",
+        catalog_model["modelRepository"],
+        model["officialRepository"],
+    )
+    check("official model revision", catalog_model["modelRevision"], model["modelRevision"])
+    check(
+        "artifact repository",
+        catalog_model["artifactRepository"],
+        model["artifactRepository"],
+    )
+    check(
+        "artifact revision",
+        catalog_model["artifactRevision"],
+        model["artifactRevision"],
+    )
+    check("artifact filename", catalog_artifact["filename"], model["artifactFilename"])
+    check("artifact byte size", catalog_artifact["bytes"], model["artifactBytes"])
+    check("artifact SHA256", catalog_artifact["sha256"], model["artifactSha256"])
+    check("model license SPDX", catalog_model["license"]["spdx"], model["licenseSpdx"])
+    check(
+        "model license review required",
+        catalog_model["license"]["reviewRequired"],
+        model["licenseReviewRequired"],
+    )
     check("runtime build", props.get("build_info"), runtime["engineBuild"])
     check("slot count", len(slots), runtime["slots"])
     check(
@@ -368,6 +407,41 @@ def main() -> int:
         "systemd installer SHA256",
         sha256(ROOT_DIR / "scripts" / "install-user-services.py"),
         configuration["systemdInstallerSha256"],
+    )
+    check(
+        "runtime controller SHA256",
+        sha256(ROOT_DIR / "scripts" / "runtime.sh"),
+        configuration["runtimeControllerSha256"],
+    )
+    check(
+        "candidate runtime SHA256",
+        sha256(ROOT_DIR / "scripts" / "candidate-runtime.sh"),
+        configuration["candidateRuntimeSha256"],
+    )
+    check(
+        "release candidate SHA256",
+        sha256(ROOT_DIR / "scripts" / "release-candidate.sh"),
+        configuration["releaseCandidateSha256"],
+    )
+    check(
+        "release check SHA256",
+        sha256(ROOT_DIR / "scripts" / "release-check.sh"),
+        configuration["releaseCheckSha256"],
+    )
+    check(
+        "deployment library SHA256",
+        sha256(ROOT_DIR / "scripts" / "lib" / "deployment.sh"),
+        configuration["deploymentLibrarySha256"],
+    )
+    check(
+        "deployment verifier SHA256",
+        sha256(ROOT_DIR / "scripts" / "verify-deployment.py"),
+        configuration["deploymentVerifierSha256"],
+    )
+    check(
+        "acceptance evidence writer SHA256",
+        sha256(ROOT_DIR / "scripts" / "acceptance-evidence.py"),
+        configuration["acceptanceEvidenceWriterSha256"],
     )
     check("contract provider", contract.get("provider"), interfaces["modelportProvider"])
     check(

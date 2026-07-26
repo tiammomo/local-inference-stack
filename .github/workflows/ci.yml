@@ -4,18 +4,52 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
 
 permissions:
   contents: read
 
 jobs:
+  python-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run Python compatibility tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
   static-gates:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      REQUIRE_GITLEAKS: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+      - name: Pull pinned secret scanner
+        run: docker pull zricethezav/gitleaks@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0
       - name: Validate catalog, tests, scripts, Compose, and portability
         run: ./scripts/release-check.sh
+
+  upstream-provenance:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Verify pinned upstream revisions and LFS hashes
+        run: ./scripts/model-manager.py audit-sources --json
