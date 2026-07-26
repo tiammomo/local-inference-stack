@@ -128,9 +128,9 @@
     "candidatePort": 18081
   },
   "records": {
-    "deployment": "docs/DEPLOYMENT_RECORD.md",
-    "decisions": "docs/DECISIONS.md",
-    "optimization": "docs/OPTIMIZATION.md",
+    "gettingStarted": "docs/GETTING_STARTED.md",
+    "architecture": "docs/ARCHITECTURE.md",
+    "operations": "docs/OPERATIONS.md",
     "acceptance": "docs/ACCEPTANCE.md"
   }
 }

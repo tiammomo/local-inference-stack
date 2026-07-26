@@ -1,18 +1,14 @@
-# 首次部署闭环
+# 首次部署
 
-本页定义新机器和 Agent 的标准路径。唯一默认动作是只读规划；模型下载、Profile
-写入、容器启动和 systemd 安装都必须得到用户明确批准。
+标准路径是“只读规划 → 人工批准 → 下载/选择 → 启动 → quick 验收”。不要跳过规划，
+也不要手写 Catalog 外的 URL、文件名或哈希。
 
 ## 1. 前置条件
 
-- Linux 或 WSL2 x86_64；
-- NVIDIA GPU 与可用的 `nvidia-smi`；
+- Linux/WSL x86_64 NVIDIA 主机；
+- NVIDIA 驱动与 Container Toolkit；
 - Docker Engine、Docker Compose v2；
-- 已按 NVIDIA 官方文档配置 Container Toolkit；
-- Python 3.10+、`curl`、足够的本机磁盘；
-- 能访问 Hugging Face，或由管理员预先放置并校验 GGUF。
-
-先检查 Docker 能看到 GPU：
+- Python 3.10+、`curl` 和足够磁盘。
 
 ```bash
 nvidia-smi
@@ -20,100 +16,59 @@ docker info
 docker compose version
 ```
 
-本项目不会用提权脚本替你安装驱动、Docker 或 Container Toolkit。系统级安装必须
-遵循发行版和 [NVIDIA 官方安装指南](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
+本仓库不安装驱动、Docker 或系统组件。
 
 ## 2. 只读规划
 
 ```bash
-./scripts/model-manager.py list
-./scripts/model-manager.py plan
 ./scripts/model-manager.py plan --json
 ```
 
-`plan` 读取 GPU 总量/空闲显存、RAM、磁盘与 Docker 状态，不联网、不写文件、不拉镜像、
-不下载权重。Agent 应把 JSON 中以下字段展示给用户：
+必须审阅：
 
-- `recommendation.id`、`displayName`、`status`、`modelRevision`、
-  `artifactRevision` 与 `license`；
-- `evidenceStatus`、`catalogEvidenceStatus`、`hardwareProfileMatch` 与
-  `hostAcceptanceStatus`、`hostAcceptanceEvidence`；硬件档位匹配不等于本机验收通过；
-- `requirements` 与 `runtime`；
-- 主权重的 `bytes`、`url`、`sha256`；
-- `fits`、`resourceAvailableNow`、`automaticDeploymentSupported`、
-  `readyToDeploy`、`caveats` 和 `nextCommands`。
+- 推荐模型、Catalog 状态与许可证；
+- 固定的模型/GGUF revision、字节数和 SHA256；
+- `evidenceStatus` 与 `hostAcceptanceStatus`；
+- VRAM/RAM/磁盘、当前空闲显存和 `caveats`；
+- `readyToDeploy` 与 `nextCommands`。
 
-如果 `recommendation` 为 `null`、`readyToDeploy=false` 或 `nextCommands` 为空，
-不要强行部署。当前自动化不覆盖无 NVIDIA GPU、少于 2GB 显存、忙碌/共享 GPU、
-多 GPU 或异常平台。
+`recommendation=null`、`readyToDeploy=false` 或空 `nextCommands` 都是停止条件。硬件档位
+相似不等于本机已经验收。
 
-## 3. 审批后下载与选择
+## 3. 批准后部署
 
 ```bash
-MODEL_ID=qwen35-9b-q5km
-./scripts/model-manager.py plan --model "$MODEL_ID"
+MODEL_ID=qwen35-9b-q5km # 替换为 plan 返回的 id
 ./scripts/model-manager.py download --model "$MODEL_ID" --yes
 ./scripts/model-manager.py select --model "$MODEL_ID" --yes
 ./scripts/model-manager.py verify --cached
-```
-
-下载只处理 Catalog 中固定到上游 commit 的 Hugging Face HTTPS URL。中断后保留
-`.part` 供续传；只有字节数和 SHA256 完全匹配才会原子发布。`select` 仅写入权限为
-`0600` 且被 Git 忽略的
-`profiles/deployment.local.env`，不包含 Token。
-
-第三方 GGUF 由 Catalog 的 `artifactPublisher` 发布。部署前仍需核对模型作者、制品
-发布者、许可证和适用政策；固定哈希不是供应链背书。
-
-## 4. 启动与直连验收
-
-```bash
 ./scripts/runtime.sh start latency
 ./scripts/runtime.sh status
 ./scripts/acceptance-suite.sh quick
 ```
 
-启动会幂等创建共享 Docker 网络，但不会安装或启动 ModelPort。直连接口固定绑定
-`127.0.0.1:18080`。`quick` 包含活动权重完整性、单元测试、运行态、生成和思考模式，
-不需要密钥。它还会生成 schema v3 本机证据；证据只在应用域机器指纹、当前
-GPU/驱动、模型、镜像与 quick 全部依赖哈希匹配，文件为当前用户所有的单硬链接
-`0600` 普通文件、自校验正确且未超过 30 天时，才被后续 `plan` 接受。
+下载保留可续传 `.part`；只有精确大小和 SHA256 匹配才会原子发布。`select` 只写入
+Git 忽略、权限 `0600` 的本地 Profile。`quick` 通过后生成 schema v3 本机验收凭证；
+主机、驱动、制品、镜像、关键脚本、权限或时间发生漂移时凭证自动失效。
 
-如果是 `estimated` 候选，重点观察：
+默认 API 为 `http://127.0.0.1:18080/v1`，不得直接暴露到网络。
 
-- 是否完整 GPU offload，是否发生 OOM；
-- 实际显存余量和首请求峰值；
-- 上下文/并发 Profile 是否满足目标；
-- 思考内容与最终答案是否正常；
-- 至少一次业务代表性质量测试。
+## 4. 可选能力
 
-通过后可以把主机、GPU、驱动、镜像、权重、Profile 和验收证据记录到新的
-`deployments/<model>-<hardware>/`，再提议把状态升级为 `validated`。
-
-## 5. 可选：开机恢复与 ModelPort
+开机恢复：
 
 ```bash
 ./scripts/install-user-services.py --enable
 ```
 
-安装器会把仓库中的模板渲染到当前用户的 systemd 目录，因此仓库可以位于任意路径。
-运营台还需要本地凭证，不能在首次部署时默认启用：
+ModelPort、Dashboard、备份和恢复演练：
 
 ```bash
 ./scripts/provision-operations-secrets.py --source /path/to/ModelPort/.env
 cp profiles/backup.local.env.example profiles/backup.local.env
-# 编辑 MODELPORT_PROJECT_DIR=/path/to/ModelPort
+# 在 backup.local.env 设置 MODELPORT_PROJECT_DIR
 ./scripts/install-user-services.py --operations --enable
-```
-
-`--operations` 同时启用每日完整备份、每周隔离恢复演练和失败标记。详细的数据边界、
-保留策略和 72 小时/7 天门禁见[单机生产运行](SINGLE_HOST_PRODUCTION.md)。
-
-ModelPort 协议验收只适用于当前版本化的 9B Provider 契约：
-
-```bash
 MODELPORT_PROJECT_DIR=/path/to/ModelPort ./scripts/acceptance-suite.sh standard
 ```
 
-切换到其他 Catalog 模型时，先协调更新 ModelPort 的模型映射和 Provider 契约，不能
-让网关静默把旧逻辑模型指向一个新模型。
+详情见 [ModelPort 接入](MODELPORT.md) 和 [运维与恢复](OPERATIONS.md)。

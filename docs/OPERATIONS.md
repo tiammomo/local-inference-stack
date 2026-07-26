@@ -1,148 +1,86 @@
-# 运维手册
+# 运维与恢复
 
 ## 日常命令
 
 ```bash
-cd "$PROJECT_ROOT"
-
-scripts/runtime.sh start
-scripts/runtime.sh status
-scripts/runtime.sh logs
-scripts/runtime.sh restart
-scripts/runtime.sh stop
+./scripts/runtime.sh status
+./scripts/runtime.sh logs
+./scripts/runtime.sh start latency
+./scripts/runtime.sh restart
+./scripts/runtime.sh stop
+./scripts/model-manager.py verify --cached
 ```
 
-默认 `latency` profile 提供单个完整 128K Slot。两个 Agent 同时工作且每路上下文
-不超过 64K 时可临时切换吞吐 profile；完成后恢复默认：
+`restart` 和 `start` 会先验证活动模型。默认 `latency` 是单 Slot；只有两个短上下文
+任务并发时才显式切换 `runtime.sh profile throughput`，完成后恢复 `latency`。
 
-```bash
-scripts/runtime.sh profile throughput
-scripts/concurrency-benchmark.py
-scripts/runtime.sh profile latency
-```
-
-`throughput` 实测双请求聚合吞吐提高约 67.9%，但单请求速度下降约 18%，不适合
-单 Agent 或长上下文任务。
-
-ModelPort：
-
-```bash
-cd "$MODELPORT_ROOT"
-docker compose ps
-docker compose logs --tail=200 -f modelport
-```
-
-本地模型运行台：
-
-```bash
-xdg-open http://127.0.0.1:33004
-systemctl --user status qwen-model-operations-dashboard.service
-```
-
-## 健康和监控
+健康入口：
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:18080/health
 curl --noproxy '*' http://127.0.0.1:18080/metrics
 curl --noproxy '*' http://127.0.0.1:38082/livez
+xdg-open http://127.0.0.1:33004
 nvidia-smi
 ```
 
-重点关注显存峰值、Prompt tokens/s、Generation tokens/s、首 Token 延迟、
-请求失败率、上下文超限和容器重启次数。
+所有端口只允许 loopback。
 
-聚合最近 24 小时真实调用、Tool Use、错误类别、llama.cpp 和 GPU 状态：
+## 长期运行
 
-```bash
-scripts/operations-report.sh --hours 24
-scripts/operations-report.sh --hours 24 --save
-```
-
-`--save` 写入被忽略的 `logs/operations/`，权限为 `0600`。报告只含聚合值，不含
-Prompt、回复、工具名/参数/结果、原始错误、请求 ID、用户、Key ID 或客户端 IP。
-阈值、周期任务和问题到回归测试的映射见 [长期维护](MAINTENANCE.md)。
-每日报告已由 user systemd 的 `qwen-model-operations-report.timer` 执行。
-报告也检查主机磁盘、最近完整备份、备份权限和 systemd 失败标记；运行台会在下一次
-5 秒聚合推送中显示这些状态。
-
-单机备份与恢复证明：
+基础开机恢复：
 
 ```bash
-scripts/modelport-backup.sh create
-scripts/modelport-backup.sh verify
-scripts/modelport-backup.sh drill
-scripts/soak-check.py --minimum-hours 72
+./scripts/install-user-services.py --enable
 ```
 
-自动周期、敏感数据边界和异机加密要求见[单机生产运行](SINGLE_HOST_PRODUCTION.md)。
-
-## 启动顺序
-
-Docker Desktop 启动后，`restart: unless-stopped` 会恢复两个 Compose 项目。
-若 DNS 或 provider 检查失败，按以下顺序恢复：
-
-1. `docker compose up -d` 启动 llama.cpp。
-2. 确认 `127.0.0.1:18080/health`。
-3. 重建或重启 ModelPort。
-4. 运行 `scripts/modelport-smoke.sh`。
-
-## 常见故障
-
-### CUDA OOM
-
-先确认没有其他进程占用 GPU。仍然不足时，按顺序调整：
-
-1. 将 `batch-size` 改为 1024、`ubatch-size` 改为 256。
-2. 停止其他 GPU 工作负载，或降低上下文后建立独立 profile 并重新验收。
-3. 最后才考虑部分 CPU offload；它会明显降低速度。
-
-不要将 KV Cache 改为 q4：本机 A/B 中只要 K 或 V 使用 q4，92K 预填充便从约
-3,100 tok/s 退化到约 200 tok/s 量级。128K 是本部署的功能目标。
-
-### ModelPort 找不到 qwen-runtime
+启用 ModelPort 运营、Dashboard、日报、备份与恢复演练：
 
 ```bash
-docker network inspect modelport_default
-docker inspect qwen35-9b-q5km --format '{{json .NetworkSettings.Networks}}'
-docker exec modelport-modelport-1 getent hosts qwen-runtime
+cp profiles/backup.local.env.example profiles/backup.local.env
+# 设置 MODELPORT_PROJECT_DIR
+./scripts/provision-operations-secrets.py --source /path/to/ModelPort/.env
+./scripts/install-user-services.py --operations --enable
+systemctl --user --failed
 ```
 
-### ModelPort 容器退出 127
-
-WSL/Docker Desktop 重启后，单文件 bind mount 可能指向失效的内部路径。删除并
-重新创建容器，不删除 volume：
+聚合报告不保存 Prompt、回复、工具数据、请求 ID 或凭据：
 
 ```bash
-cd "$MODELPORT_ROOT"
-docker compose rm -sf modelport dashboard
-docker compose up -d modelport dashboard
+./scripts/operations-report.sh --hours 24
+./scripts/operations-report.sh --hours 24 --fail-on-alert
 ```
 
-### 输出只有 Reasoning、没有最终答案
+## 备份与稳定性
 
-检查客户端 `max_tokens` 是否过小。复杂任务建议至少 8192，长链路思考建议允许
-最多 32768；渲染后输入、思考和正文总量仍不得超过 131072。生产环境建议将
-输入控制在约 92K。
-
-服务默认启用推理。若直连 llama.cpp 的任务更重视低延迟，可按请求关闭：
-
-```json
-{"chat_template_kwargs":{"enable_thinking":false}}
+```bash
+./scripts/modelport-backup.sh create
+./scripts/modelport-backup.sh verify
+./scripts/modelport-backup.sh drill
+./scripts/soak-check.py --minimum-hours 72
+./scripts/soak-check.py --minimum-hours 168 --json
 ```
 
-经 ModelPort 调用时使用 Anthropic `thinking` 字段，或选择 `qwen3.5-fast`、
-`qwen3.5-code`、`qwen3.5-deep` 逻辑模型；网关会映射请求级开关和预算。
+备份含数据库、配置和明文凭据：目录必须 `0700`、归档必须 `0600`，异机副本必须
+加密。`drill` 在隔离 PostgreSQL 容器中恢复，不写生产库。72 小时用于灰度，168 小时
+用于单机稳定基线；容器 recreate 会重新计时。单机备份不等于高可用。
 
-### 首轮很慢、后续同前缀请求明显变快
+## 缓存
 
-这是预期行为。服务为提示缓存预留 8GiB RAM；92K 冷请求实测约 41.83 秒，同一
-前缀的热请求约 7.37 秒。Agent 应尽量保持系统提示和稳定说明位于消息前部，
-把易变内容放在尾部，以提高最长公共前缀命中率。
+Prompt RAM Cache 自动工作；稳定 system prompt、工具定义和规则放在前部，动态内容
+放在尾部可提高命中。`slot-cache.sh` 保存的 KV 可能包含完整 Prompt，只能用于合成
+前缀实验，保持 `0600`，不得提交或复制到公共存储。
 
-## 升级和回滚
+## 故障处理
 
-1. 不使用浮动镜像启动生产配置；先记录新 digest。
-2. 新镜像用临时端口完成冒烟和 118K 上下文验收。
-3. 一次只升级推理引擎或模型中的一个。
-4. 通过后修改 `compose.yaml` digest 并重新创建容器。
-5. 回滚只需恢复旧 digest；模型文件和 ModelPort 配置不变。
+| 现象 | 处理 |
+| --- | --- |
+| CUDA OOM / 空闲显存不足 | 停止其他 GPU 负载，重新运行 `plan --json`；需要改容量时新建并验收 Profile，不临时绕过门禁 |
+| Runtime 不健康 | 运行 `status`、`logs`、`verify --cached`；确认后再用受控 `restart` |
+| ModelPort 找不到 `qwen-runtime` | 检查 `modelport_default` 网络、容器健康和 DNS alias |
+| 只有 reasoning、没有正文 | 用精确 Token 计数检查输入，增加合理 `max_tokens` 或降低思考预算 |
+| 磁盘/备份/systemd 告警 | 运行带 `--fail-on-alert` 的报告，验证最新备份并检查 user journal |
+
+恢复顺序：先用 `runtime.sh start latency` 恢复并确认 `18080/health`，再恢复 ModelPort，
+最后运行 `acceptance-suite.sh standard`。不要用裸 Compose 命令绕过完整性和 Profile
+检查。

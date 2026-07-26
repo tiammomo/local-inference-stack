@@ -1,148 +1,76 @@
-# 验收方案
+# 验收与发布
 
-## 通用首次部署必须通过
+## 验收分层
 
-所有 Catalog 模型先运行 `quick`：单元测试、运行态、直连生成和默认思考模式必须
-通过；模型哈希必须匹配，容器不得 OOM 或异常重启。`estimated` 候选还要记录目标机
-显存峰值、GPU offload、上下文和代表性质量结果，不能因“能启动”就标为已验证。
-
-## 当前 9B / 5070 Ti 发布基线
-
-| 项目 | 通过标准 |
-| --- | --- |
-| 模型完整性 | 实际加载的生产权重字节数与 SHA256 均匹配 |
-| GPU 后端 | 日志显示 CUDA、RTX 5070 Ti、全部模型层 GPU offload |
-| 配置 | 128K、单 Slot、Flash Attention、Q8_0 K/V Cache 生效 |
-| 健康 | llama.cpp `/health` 与 ModelPort `/livez` 返回 200 |
-| 直连生成 | 中文确定性冒烟请求成功 |
-| ModelPort | `/v1/messages` 经 `local_qwen` 返回成功 |
-| Tool Use 协议 | 非流式、聚合后流式参数、continuation 通过；严格模式拒绝未声明工具和非法 JSON |
-| 精确 Token 计数 | ModelPort 逻辑别名与 llama.cpp 直连对同一中文/Tool Schema 请求计数完全一致 |
-| 上下文准入 | 超过 128K 总预算返回 400，错误包含精确用量且明确不做静默截断 |
-| 思考长上下文 | ModelPort 约 92K 输入、最多 32K 输出时准确返回中部验收码 |
-| 容量长上下文 | 直连关闭思考后，约 118K prompt 能准确返回中部验收码 |
-| 稳定性 | 无 OOM、无容器异常重启、无持续显存增长 |
-| 余量 | 峰值至少保留约 10% 显存 |
-| 质量门禁 | 合成冒烟全部通过；正式升级运行三次重复集并保存聚合证据 |
-
-## 执行命令
-
-统一入口按变更风险分为三档：
+| 模式 | 覆盖 | 何时运行 |
+| --- | --- | --- |
+| `quick` | 单测、活动权重、运行态、直连生成与思考 | 首次部署、普通本仓变更 |
+| `standard` | quick + ModelPort 契约、Token、Dashboard、Tool Use、质量冒烟 | 协议、推理或 Tool 变更 |
+| `full` | standard + 完整哈希、长上下文、性能、完整质量集 | 模型、量化、KV、上下文、镜像升级 |
 
 ```bash
-scripts/acceptance-suite.sh quick
-scripts/acceptance-suite.sh standard
-scripts/acceptance-suite.sh full
+./scripts/acceptance-suite.sh quick
+MODELPORT_PROJECT_DIR=/path/to/ModelPort ./scripts/acceptance-suite.sh standard
+MODELPORT_PROJECT_DIR=/path/to/ModelPort ./scripts/acceptance-suite.sh full
 ```
 
-`quick` 是无密钥的独立部署门禁，包含活动权重 SHA256、运行态、生成和默认思考；
-`standard` 用于当前 9B Provider 的 ModelPort、
-Token 和 Tool Use 协议变更，需要显式设置 `MODELPORT_PROJECT_DIR`；standard 会先
-执行机器可读跨仓库配置检查。`full` 用于模型、
-量化、KV、上下文、Slot、镜像或重大版本升级。三档都会 fail-fast 并执行真实调用。
+所有模式 fail-fast。`standard/full` 只支持当前版本化的 9B Provider 契约，并要求显式
+提供兼容 ModelPort checkout。
 
-每次执行默认在 `logs/acceptance/` 保存权限为 `0600` 的文本日志和机器可读 JSON
-证据。schema v3 记录模式、结果、耗时、Git commit、GPU/驱动/RAM、模型与 GGUF
-revision、权重字节数/SHA256、运行镜像、quick 传递依赖哈希、自校验摘要和
-30 天新鲜度策略。应用域隔离的机器 ID SHA256 用于区分同规格主机；不保存原始
-machine-id、hostname、Prompt、回复、工具参数、凭证或容器原始环境。
+## 本机凭证
 
-`model-manager.py plan` 会通过无符号链接安全读取只读扫描这些证据，但仅接受当前
-用户所有、权限 `0600`、单硬链接、正文自校验通过、时间不在未来且未超过 30 天的
-schema v3 记录。机器指纹、当前模型/制品/配置和 quick 传递依赖必须完全匹配，
-GPU 名称、数量、显存和驱动也必须一致。匹配时返回
-`hostAcceptanceStatus=passed-current-configuration` 和相对证据路径；旧 schema、
-过期/复制/宽权限记录、失败记录、驱动或配置漂移都会退回
-`not-evaluated-by-read-only-plan`。
-非当前 9B 已验证档位会把 manifest 标记为 `unvalidated-catalog-profile`，直到创建新的
-可复查部署档案，避免误用 5070 Ti 清单。
-临时调试时可加 `--no-record`。运行态与版本化部署清单的一致性使用：
+验收日志和 JSON 写入 Git 忽略的 `logs/acceptance/`。只有通过的 schema v3 凭证才
+可能产生 `validated-on-this-host`；它还必须满足：
+
+- 当前用户所有、普通文件、单硬链接、权限 `0600`；
+- 未超过 30 天，时间和正文自校验正确；
+- 机器指纹、GPU/驱动、模型、GGUF、镜像和关键依赖哈希全部匹配。
+
+复制到其他主机、配置漂移、过期或权限放宽都会使凭证失效。硬件档位匹配不能替代它。
+
+## 发布前检查
 
 ```bash
-scripts/verify-deployment.py
+./scripts/release-check.sh
+./scripts/model-manager.py audit-sources --json
+python3 ./scripts/verify-deployment.py
+
+python3 ./scripts/compatibility-check.py \
+  --modelport-project "$MODELPORT_PROJECT_DIR" --release
 ```
 
-发布前还要验证两个仓库的提交状态与 manifest：
+`release-check` 包含单测、Compose/候选身份检查、Git 禁入项和 Gitleaks。来源审计会联网
+核对固定 revision/LFS 身份，但仍不能替代许可证和发布者信任审查。
+
+质量或 Tool Use 定位时使用；这些命令要求已配置可用的 ModelPort：
 
 ```bash
-python3 scripts/compatibility-check.py \
-  --modelport-project "$MODELPORT_ROOT" \
-  --release
-```
-
-需要单项复验时使用以下底层命令：
-
-```bash
-cd "$PROJECT_ROOT"
-scripts/verify-models.sh --active --cached
-scripts/smoke-test.sh
-scripts/reasoning-smoke.sh
-scripts/modelport-smoke.sh
-scripts/modelport-reasoning-smoke.sh
-scripts/modelport-token-count-smoke.sh
-scripts/modelport-context-admission-smoke.sh
 python3 scripts/quality-eval.py --smoke
-python3 scripts/context-acceptance.py
-scripts/modelport-context-acceptance.sh
-python3 scripts/decode-benchmark.py
-python3 scripts/concurrency-benchmark.py
-scripts/runtime.sh status
+python3 scripts/quality-eval.py --trials 3
+python3 scripts/tool-workflow-eval.py --smoke
+python3 scripts/tool-workflow-eval.py
+python3 scripts/tool-workflow-eval.py \
+  --cases quality/tool-resilience-workflows.json
 ```
 
-ModelPort 长上下文验收默认构造约 92K 输入，并为思考和正文保留最多 32,768
-tokens；直连 118K 用于验证容量，脚本显式关闭思考。两者都要求最终正文精确匹配，
-不能只在 `reasoning_content` 中出现验收码。
+证据只保存 Case ID、数值和结果，不保存 Prompt、回复或工具数据。
 
-## 流式请求
+## 串行候选与回滚
 
-通过 ModelPort 发起 `stream=true` 请求，必须看到合法的 `message_start`、
-content block 增量和结束事件。HTTP 200 但缺少终止事件不算通过。
-
-## Tool Use
-
-基线模型服务稳定后运行 ModelPort 的真实上游测试：
+16GB 单卡不能并驻生产与完整候选。以下命令会停止生产并造成短暂中断，只能在用户
+明确批准的维护窗口执行；脚本无论成功、失败或中断都会恢复原生产：
 
 ```bash
-cd "$MODELPORT_ROOT"
-scripts/provider-matrix.sh --model qwen3.5-code
-scripts/tool-use-acceptance.sh --upstream --max-tokens 2048
+MODELPORT_PROJECT_DIR=/path/to/ModelPort \
+  ./scripts/release-candidate.sh quick
 ```
 
-Tool Use 失败不影响纯聊天服务验收，但在接入 Agent/Claude Code 前必须修复或
-明确禁用对应能力。
+晋级要求：
 
-本地验收使用 `streaming_arguments="best_effort"` 和
-`response_validation="strict"`。流式事件中可以只出现一个完整
-`input_json_delta`；验收仍应拼接全部 delta 后解析，且只有收到
-`content_block_stop` 与 `stop_reason=tool_use` 才能执行工具。
+1. 一次只改变一个主要变量，并固定镜像 digest、制品 SHA256 和 Profile。
+2. 按风险通过 quick、standard/full、质量、上下文、显存和恢复检查。
+3. 更新 Catalog/Compose/manifest 与必要文档，再运行发布前检查。
+4. 重建生产后运行 `standard`；72 小时用于灰度，168 小时用于稳定基线。
 
-当前严格模式除非法 JSON、非 Object、未声明工具、重复 ID、调用数量和 finish reason
-外，还会按所选工具的完整 `input_schema` 校验参数。随后从本项目执行闭环冒烟，确保
-Mock Tool 结果能回传并产生正确最终正文：
-
-```bash
-cd "$PROJECT_ROOT"
-scripts/tool-workflow-eval.py --smoke
-```
-
-业务工具的授权、沙箱、副作用和最终业务正确性仍不属于 ModelPort；完整范围见
-[`ENHANCEMENT_ROADMAP.md`](ENHANCEMENT_ROADMAP.md)。
-
-## 2026-07-18 128K 实际结果
-
-上述必须项全部通过，包括默认思考、ModelPort 流式和 Tool Use。直连关闭思考的
-118K 容量复验使用 118,062 prompt tokens，42.61 秒返回验收码；ModelPort 默认
-思考链路计入 92,063 input tokens，冷缓存 39.26 秒返回相同结果；此前同前缀热缓存
-为 7.37 秒。
-两项均无 OOM 或截断。完整数据见 [DEPLOYMENT_RECORD.md](DEPLOYMENT_RECORD.md)。
-
-精确 Token 计数也已通过：包含中文 system、混合消息和 Tool Schema 的请求会先把
-直连侧渲染参数对齐到 ModelPort `qwen3.5-code` 的默认开启思考策略，再要求双方完全
-一致。数值可能随已审查的模板版本变化，门禁比较的是同一模板语义而不是固定常数。
-
-双 Slot 不是必须生产项，但其 profile 已通过两路并发 A/B：聚合吞吐
-138.71 tok/s，相对单 Slot 82.60 tok/s 提升约 67.9%。验收后已恢复单 Slot 128K。
-
-质量集只包含可公开的合成输入。`logs/quality/` 的证据仅记录 Case ID、通过状态、
-Token 和延迟，不保存 Prompt 或回复；完整正式门禁使用 `--trials 3`，避免一次采样
-偶然通过。
+失败时恢复上一 Git revision、镜像 digest、Catalog 制品和 Profile，再运行 quick。
+旧 GGUF 删除前必须完成回滚演练；任何 recreate 都会重置连续运行计时。
