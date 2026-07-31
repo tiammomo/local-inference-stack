@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.request import urlopen
+
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
 
 
 BASE_URL = "http://127.0.0.1:33004"
 
 
 def get_json(path: str) -> Any:
-    with urlopen(f"{BASE_URL}{path}", timeout=30) as response:
+    with direct_urlopen(f"{BASE_URL}{path}", timeout=30) as response:
         return json.load(response)
 
 

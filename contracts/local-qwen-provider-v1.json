@@ -42,6 +42,7 @@
     },
     "toolUse": {
       "supported": true,
+      "toolChoice": true,
       "streamingArguments": "best_effort",
       "responseValidation": "strict",
       "repairInvalidArguments": {
@@ -54,8 +55,27 @@
     "streaming": true,
     "trafficClass": {
       "header": "x-modelport-traffic-class",
-      "values": ["business", "synthetic", "diagnostic"],
+      "values": ["business", "synthetic", "diagnostic", "batch"],
       "default": "business"
+    }
+  },
+  "governance": {
+    "routingModeHeader": "x-modelport-hybrid-mode",
+    "routingModeResponseHeader": "x-modelport-execution-mode",
+    "routingModes": ["local_strict", "local_first", "balanced", "cloud_first"],
+    "defaultMode": "local_strict",
+    "classificationHeader": "x-modelport-data-classification",
+    "classifications": ["unknown", "sensitive", "internal", "public"],
+    "forcedLocalClassifications": ["unknown", "sensitive"],
+    "localAdmission": {
+      "executingPerUser": 1,
+      "queuedPerUser": 2,
+      "globalInteractiveQueue": 16,
+      "overflowAfterSeconds": 5,
+      "strictWaitSeconds": 60,
+      "strictTimeoutStatus": 429,
+      "strictTimeoutRetryAfter": true,
+      "batchQueue": "independent-low-priority"
     }
   },
   "limits": {

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -48,10 +51,19 @@ def host(
         "totalFreeVramGiB": available,
         "largestFreeVramGiB": available,
         "ramGiB": ram,
+        "availableRamGiB": ram,
         "freeDiskGiB": disk,
         "docker": {"available": True, "version": "test"},
-        "dockerCompose": {"available": True, "version": "test"},
+        "dockerCompose": {
+            "available": True,
+            "version": "test",
+            "configurationCompatible": True,
+        },
         "nvidiaContainerRuntime": True,
+        "curl": {"available": True, "version": "test"},
+        "python": {"version": "3.12", "supported": True},
+        "commands": {"flock": True},
+        "user": {"uid": 1000, "gid": 1000},
     }
 
 
@@ -69,6 +81,28 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(len(model["artifacts"]), 1)
             self.assertEqual(model["license"]["spdx"], "Apache-2.0")
             self.assertNotIn("/resolve/main/", model["artifacts"][0]["url"])
+
+    def test_acquisition_record_separates_identity_publisher_and_license_status(self) -> None:
+        model = self.catalog["models"][0]
+        artifact = model["artifacts"][0]
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            MODEL_MANAGER, "ACQUISITION_DIR", Path(directory)
+        ), patch.object(MODEL_MANAGER, "command_output", return_value="curl test"):
+            MODEL_MANAGER.record_acquisition(
+                model, artifact, method="verified-existing-local"
+            )
+            record_path = next(Path(directory).glob("*.json"))
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                record["verification"]["identity"],
+                "verified-byte-size-and-sha256",
+            )
+            self.assertEqual(
+                record["verification"]["publisher"],
+                "not-cryptographically-verified",
+            )
+            self.assertEqual(record["license"]["reviewRequired"], True)
+            self.assertEqual(record_path.stat().st_mode & 0o777, 0o600)
             self.assertIn(
                 f"/resolve/{model['artifactRevision']}/",
                 model["artifacts"][0]["url"],
@@ -85,7 +119,7 @@ class CatalogTests(unittest.TestCase):
             4: "qwen35-2b-q5km",
             6: "qwen35-4b-q5km",
             10: "qwen35-9b-q4km",
-            14: "qwen35-9b-q5km",
+            12: "qwen35-9b-q5km",
             22: "qwen35-27b-q4km",
             28: "qwen35-35b-a3b-q4km",
         }
@@ -154,6 +188,27 @@ class CatalogTests(unittest.TestCase):
         self.assertFalse(plan["readyToDeploy"])
         self.assertEqual(plan["nextCommands"], [])
 
+    def test_capacity_override_is_never_deployment_authority(self) -> None:
+        assessed = host(16, name="NVIDIA GeForce RTX 5070 Ti")
+        plan = MODEL_MANAGER.plan_for_host(
+            Namespace(model=None),
+            self.catalog,
+            assessed,
+            simulation=True,
+        )
+        self.assertTrue(plan["fits"])
+        self.assertFalse(plan["readyToDeploy"])
+        self.assertEqual(plan["nextCommands"], [])
+        self.assertTrue(plan["simulatedHost"])
+
+    def test_available_ram_is_part_of_current_resource_admission(self) -> None:
+        assessed = host(16, ram=96, name="NVIDIA GeForce RTX 5070 Ti")
+        assessed["availableRamGiB"] = 4
+        plan = MODEL_MANAGER.plan_for_host(Namespace(model=None), self.catalog, assessed)
+        self.assertTrue(plan["fits"])
+        self.assertFalse(plan["resourceAvailableNow"])
+        self.assertFalse(plan["readyToDeploy"])
+
     def test_plan_distinguishes_profile_match_from_host_acceptance(self) -> None:
         assessed = host(16, name="NVIDIA GeForce RTX 5070 Ti")
         args = Namespace(model=None)
@@ -180,7 +235,7 @@ class CatalogTests(unittest.TestCase):
         artifact = model["artifacts"][0]
         now = datetime(2026, 7, 26, 10, 1, tzinfo=timezone.utc)
         evidence = {
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "evidenceId": "test",
             "status": "passed",
             "exitCode": 0,
@@ -188,6 +243,7 @@ class CatalogTests(unittest.TestCase):
             "terminalStep": "Direct reasoning",
             "durationSeconds": 60,
             "mode": "quick",
+            "profile": "latency",
             "startedAt": "2026-07-26T09:59:00+00:00",
             "finishedAt": "2026-07-26T10:00:00+00:00",
             "catalogModelId": model["id"],
@@ -215,18 +271,31 @@ class CatalogTests(unittest.TestCase):
                 "integrityVerified": True,
             },
             "runtime": {
+                "containerName": model["id"],
                 "configuredImage": MODEL_MANAGER.configured_runtime_image(),
                 "imageId": "sha256:test",
+                "containerConfigSha256": "runtime-config-test",
             },
             "configuration": MODEL_MANAGER.acceptance_configuration(model),
             "freshnessPolicy": {"maxAgeDays": 30, "futureSkewSeconds": 300},
         }
         evidence["selfSha256"] = MODEL_MANAGER.payload_sha256(evidence)
-        self.assertTrue(
-            MODEL_MANAGER.acceptance_matches_host(
-                model, assessed, evidence, now=now
+        original_live_container = MODEL_MANAGER.live_container
+        original_live_sha256 = MODEL_MANAGER.live_runtime_sha256
+        MODEL_MANAGER.live_container = lambda _name: {
+            "Image": "sha256:test",
+            "State": {"Status": "running", "Health": {"Status": "healthy"}},
+        }
+        MODEL_MANAGER.live_runtime_sha256 = lambda _container: "runtime-config-test"
+        try:
+            self.assertTrue(
+                MODEL_MANAGER.acceptance_matches_host(
+                    model, assessed, evidence, now=now
+                )
             )
-        )
+        finally:
+            MODEL_MANAGER.live_container = original_live_container
+            MODEL_MANAGER.live_runtime_sha256 = original_live_sha256
         acceptance = {
             "status": "passed-current-configuration",
             "evidence": "logs/acceptance/test.json",
@@ -243,11 +312,20 @@ class CatalogTests(unittest.TestCase):
 
         evidence["host"]["gpus"][0]["driver"] = "changed-driver"
         evidence["selfSha256"] = MODEL_MANAGER.payload_sha256(evidence)
-        self.assertFalse(
-            MODEL_MANAGER.acceptance_matches_host(
-                model, assessed, evidence, now=now
+        MODEL_MANAGER.live_container = lambda _name: {
+            "Image": "sha256:test",
+            "State": {"Status": "running", "Health": {"Status": "healthy"}},
+        }
+        MODEL_MANAGER.live_runtime_sha256 = lambda _container: "runtime-config-test"
+        try:
+            self.assertFalse(
+                MODEL_MANAGER.acceptance_matches_host(
+                    model, assessed, evidence, now=now
+                )
             )
-        )
+        finally:
+            MODEL_MANAGER.live_container = original_live_container
+            MODEL_MANAGER.live_runtime_sha256 = original_live_sha256
 
     def test_acceptance_expires_and_rejects_future_timestamps(self) -> None:
         model = MODEL_MANAGER.model_by_id(self.catalog, "qwen35-9b-q5km")
@@ -255,7 +333,7 @@ class CatalogTests(unittest.TestCase):
         artifact = model["artifacts"][0]
         now = datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc)
         evidence = {
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "evidenceId": "test",
             "status": "passed",
             "exitCode": 0,
@@ -263,6 +341,7 @@ class CatalogTests(unittest.TestCase):
             "terminalStep": "Direct reasoning",
             "durationSeconds": 60,
             "mode": "quick",
+            "profile": "latency",
             "startedAt": (
                 now - timedelta(days=31, minutes=1)
             ).isoformat(),

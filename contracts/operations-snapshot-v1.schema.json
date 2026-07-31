@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-inference-stack.invalid/contracts/operations-snapshot-v1.schema.json",
+  "title": "Aggregate-only operations snapshot",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAtEpochMs", "privacy", "window", "health", "traffic", "alerts"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "generatedAtEpochMs": {"type": "integer", "minimum": 0},
+    "privacy": {
+      "type": "object",
+      "required": ["mode", "excluded"],
+      "properties": {
+        "mode": {"const": "aggregate-only"},
+        "excluded": {
+          "type": "array",
+          "contains": {"const": "prompts"}
+        }
+      }
+    },
+    "window": {
+      "type": "object",
+      "required": ["hours"],
+      "properties": {"hours": {"enum": [1, 6, 24, 168]}}
+    },
+    "health": {"type": "object"},
+    "traffic": {"type": "object"},
+    "alerts": {"type": "array"}
+  }
+}

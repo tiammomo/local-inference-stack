@@ -2,12 +2,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ALERT_PROFILE="${OPERATIONS_ALERT_PROFILE_FILE:-$ROOT_DIR/profiles/alerting.local.env}"
+ALERT_PROFILE="${OPERATIONS_ALERT_PROFILE_FILE:-}"
+if [[ -z "$ALERT_PROFILE" && -n "${CREDENTIALS_DIRECTORY:-}" \
+  && -f "$CREDENTIALS_DIRECTORY/alerting.env" ]]; then
+  ALERT_PROFILE="$CREDENTIALS_DIRECTORY/alerting.env"
+fi
+ALERT_PROFILE="${ALERT_PROFILE:-$ROOT_DIR/profiles/alerting.local.env}"
 STATE_DIR="$ROOT_DIR/logs/alerts"
 ACTION="${1:-}"
 UNIT="${2:-}"
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
 
 if [[ -f "$ALERT_PROFILE" ]]; then
+  validate_private_env_file "$ALERT_PROFILE"
   set -a
   # shellcheck disable=SC1090
   source "$ALERT_PROFILE"
@@ -20,6 +28,7 @@ if [[ ! "$UNIT" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
 fi
 
 MARKER="$STATE_DIR/$UNIT.json"
+cd "$ROOT_DIR"
 
 case "$ACTION" in
   clear)
@@ -28,29 +37,27 @@ case "$ACTION" in
   fire)
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR"
+    if [[ -e "$MARKER" ]]; then
+      validate_private_env_file "$MARKER"
+      printf 'Alert already recorded: %s\n' "$MARKER"
+      exit 0
+    fi
     python3 - "$MARKER" "$UNIT" <<'PY'
 import json
-import os
-import socket
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from scripts.env_utils import atomic_write_private_json
 
 target = Path(sys.argv[1])
 payload = {
     "schemaVersion": 1,
     "event": "local_inference_service_failure",
     "unit": sys.argv[2],
-    "host": socket.gethostname(),
     "generatedAt": datetime.now(timezone.utc).isoformat(),
 }
-with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
-    json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-    handle.write("\n")
-    temporary = Path(handle.name)
-os.chmod(temporary, 0o600)
-temporary.replace(target)
+atomic_write_private_json(target, payload)
 print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 PY
     webhook="${OPERATIONS_ALERT_WEBHOOK_URL:-}"

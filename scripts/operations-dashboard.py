@@ -20,7 +20,7 @@ from contextlib import closing
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -58,7 +58,8 @@ class HistoryStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.path.parent.chmod(0o700)
         with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
@@ -240,64 +241,50 @@ class DashboardState:
                 ),
             }
         )
-        self.admin = self._new_admin()
+    @staticmethod
+    def _snapshot_path(hours: float) -> Path:
+        label = str(int(hours)) if hours.is_integer() else str(hours).replace(".", "-")
+        return REPORT_DIR / f"latest-{label}.json"
 
-    def _new_admin(self) -> Any:
-        username = os.environ.get("MODELPORT_ADMIN_USERNAME", "")
-        password = os.environ.get("MODELPORT_ADMIN_PASSWORD", "")
-        if not username or not password:
-            raise RuntimeError(
-                "MODELPORT_ADMIN_USERNAME and MODELPORT_ADMIN_PASSWORD must be set"
-            )
-        base_url = os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
-        return self.module.AdminClient(base_url, username, password)
-
-    def _args(self, hours: float) -> SimpleNamespace:
-        return SimpleNamespace(
-            hours=hours,
-            modelport_url=os.environ.get(
-                "MODELPORT_BASE_URL", "http://127.0.0.1:38082"
-            ),
-            qwen_url=os.environ.get("QWEN_RUNTIME_URL", "http://127.0.0.1:18080"),
-            max_records=int(os.environ.get("OPERATIONS_DASHBOARD_MAX_RECORDS", "5000")),
-            unreconciled_baseline=int(
-                os.environ.get("OPERATIONS_UNRECONCILED_BASELINE", "0")
-            ),
-            include_synthetic=False,
-            provider=["local_qwen"],
-            resolved_model=[],
-            failure_rate_warn=float(
-                os.environ.get("OPERATIONS_FAILURE_RATE_WARN", "0.05")
-            ),
-            tool_failure_rate_warn=float(
-                os.environ.get("OPERATIONS_TOOL_FAILURE_RATE_WARN", "0.05")
-            ),
-            p95_latency_ms_warn=int(
-                os.environ.get("OPERATIONS_P95_LATENCY_MS_WARN", "180000")
-            ),
-            disk_free_percent_warn=float(
-                os.environ.get("OPERATIONS_DISK_FREE_PERCENT_WARN", "10")
-            ),
-            disk_free_bytes_warn=int(
-                os.environ.get("OPERATIONS_DISK_FREE_BYTES_WARN", str(20 * 1024**3))
-            ),
-            backup_max_age_hours=float(
-                os.environ.get("OPERATIONS_BACKUP_MAX_AGE_HOURS", "36")
-            ),
-        )
+    @staticmethod
+    def _validate_snapshot(report: Any, hours: float) -> dict[str, Any]:
+        if not isinstance(report, dict) or report.get("schemaVersion") != 1:
+            raise RuntimeError("operations snapshot has an unsupported schema")
+        privacy = report.get("privacy", {})
+        if privacy.get("mode") != "aggregate-only":
+            raise RuntimeError("operations snapshot is not aggregate-only")
+        generated = report.get("generatedAtEpochMs")
+        if not isinstance(generated, int) or generated < 0:
+            raise RuntimeError("operations snapshot has no valid generation time")
+        observed_hours = report.get("window", {}).get("hours")
+        if not isinstance(observed_hours, (int, float)) or float(observed_hours) != hours:
+            raise RuntimeError("operations snapshot window does not match the request")
+        return report
 
     def report(self, hours: float, force: bool = False) -> dict[str, Any]:
         with self.lock:
             cached = self.cache.get(hours)
             if not force and cached and time.monotonic() - cached[0] < self.cache_seconds:
                 return cached[1]
+            path = self._snapshot_path(hours)
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError(
+                    f"aggregate operations snapshot is unavailable: {path.name}"
+                )
             try:
-                report = self.module.build_report(self._args(hours), admin=self.admin)
-            except RuntimeError as error:
-                if "401" not in str(error) and "403" not in str(error):
-                    raise
-                self.admin = self._new_admin()
-                report = self.module.build_report(self._args(hours), admin=self.admin)
+                report = self._validate_snapshot(
+                    json.loads(path.read_text(encoding="utf-8")), hours
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"aggregate operations snapshot is unreadable: {path.name}"
+                ) from error
+            age_ms = int(time.time() * 1000) - report["generatedAtEpochMs"]
+            max_age_ms = int(
+                os.environ.get("OPERATIONS_SNAPSHOT_MAX_AGE_SECONDS", "1200")
+            ) * 1000
+            if age_ms < -300_000 or age_ms > max_age_ms:
+                raise RuntimeError(f"aggregate operations snapshot is stale: {path.name}")
             self.cache[hours] = (time.monotonic(), report)
             self._record_realtime(report)
             return report
@@ -395,7 +382,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def state(self) -> DashboardState:
         return self.server.dashboard_state  # type: ignore[attr-defined]
 
+    def allowed_authorities(self) -> set[str]:
+        port = int(self.server.server_address[1])
+        return {
+            f"127.0.0.1:{port}",
+            f"localhost:{port}",
+            f"[::1]:{port}",
+        }
+
+    def validate_host(self) -> bool:
+        if self.headers.get("Host", "").lower() in self.allowed_authorities():
+            return True
+        self.send_json({"error": "host rejected"}, HTTPStatus.MISDIRECTED_REQUEST)
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self.validate_host():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/ws":
             self.handle_websocket()
@@ -412,6 +415,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.serve_static(parsed.path)
 
     def do_HEAD(self) -> None:  # noqa: N802
+        if not self.validate_host():
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
             self.send_response(HTTPStatus.NO_CONTENT)
@@ -421,6 +426,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.serve_static(parsed.path, head_only=True)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self.validate_host():
+            return
         self.send_json({"error": "read-only dashboard"}, HTTPStatus.METHOD_NOT_ALLOWED)
 
     def handle_status(self, query: str) -> None:
@@ -464,9 +471,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {"error": "websocket upgrade required"}, HTTPStatus.UPGRADE_REQUIRED
             )
             return
-        host = self.headers.get("Host", "")
         origin = self.headers.get("Origin", "")
-        if origin not in {f"http://{host}", f"https://{host}"}:
+        allowed_origins = {
+            f"{scheme}://{authority}"
+            for scheme in ("http", "https")
+            for authority in self.allowed_authorities()
+        }
+        if origin.lower() not in allowed_origins:
             self.send_json({"error": "origin rejected"}, HTTPStatus.FORBIDDEN)
             return
         if self.headers.get("Sec-WebSocket-Version") != "13":

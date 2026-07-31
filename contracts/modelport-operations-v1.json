@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "contractId": "modelport-aggregate-operations-v1",
+  "status": "consumer-ready-upstream-scope-pending",
+  "transport": {
+    "binding": "loopback-or-private-container-network",
+    "endpointStatus": "must-be-defined-by-joint-modelport-migration",
+    "tlsRequiredWhenNonLoopback": true
+  },
+  "authorization": {
+    "requiredScope": "operations:aggregate:read",
+    "mustDeny": [
+      "users:read",
+      "users:write",
+      "keys:read",
+      "keys:write",
+      "requests:raw",
+      "ledger:write"
+    ],
+    "currentCompatibilityAdapter": "short-lived-admin-collector",
+    "currentAdapterIsLeastPrivilege": false
+  },
+  "request": {
+    "windowsHours": [1, 6, 24, 168],
+    "providers": ["local_qwen"]
+  },
+  "response": {
+    "schema": "operations-snapshot-v1.schema.json",
+    "forbiddenFields": [
+      "prompt",
+      "response",
+      "toolArguments",
+      "rawError",
+      "requestId",
+      "username",
+      "apiKeyId",
+      "clientIp"
+    ]
+  },
+  "migrationGate": {
+    "requiresModelPortChange": true,
+    "requiresBothRepositoryCompatibilityTests": true,
+    "dashboardCredentialAccessAllowed": false
+  }
+}

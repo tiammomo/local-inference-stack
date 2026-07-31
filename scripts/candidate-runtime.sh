@@ -21,7 +21,12 @@ CANDIDATE_CONTAINER="$QWEN_CONTAINER_NAME"
 CANDIDATE_URL="http://127.0.0.1:${QWEN_PUBLISH_PORT}"
 
 compose() {
-  docker compose --env-file "$PROFILE_FILE" "$@"
+  local args=()
+  if [[ -f "$ROOT_DIR/profiles/deployment.local.env" ]]; then
+    args+=(--env-file "$ROOT_DIR/profiles/deployment.local.env")
+  fi
+  args+=(--env-file "$PROFILE_FILE")
+  run_clean_compose "$ROOT_DIR" "${args[@]}" "$@"
 }
 
 is_running() {
@@ -45,18 +50,22 @@ cd "$ROOT_DIR"
 
 case "$ACTION" in
   start)
+    acquire_runtime_lock "$ROOT_DIR"
     if is_running "$PRODUCTION_CONTAINER"; then
       printf 'Production is running. Stop it before starting the serial candidate:\n' >&2
       printf '  ./scripts/runtime.sh stop\n' >&2
       exit 2
     fi
+    "$ROOT_DIR/scripts/model-manager.py" admit --model "$QWEN_CATALOG_ID"
     "$ROOT_DIR/scripts/verify-models.sh" --active --cached
     docker network inspect "${MODELPORT_NETWORK_NAME:-modelport_default}" >/dev/null
     mkdir -p "$ROOT_DIR/cache/candidate/slots"
+    chmod 700 "$ROOT_DIR/cache/candidate" "$ROOT_DIR/cache/candidate/slots"
     compose up -d qwen35
     wait_healthy
     ;;
   accept)
+    acquire_runtime_lock "$ROOT_DIR"
     if ! is_running "$CANDIDATE_CONTAINER"; then
       printf 'Candidate container is not running.\n' >&2
       exit 2
@@ -83,6 +92,7 @@ case "$ACTION" in
     compose config --format json
     ;;
   stop)
+    acquire_runtime_lock "$ROOT_DIR"
     compose down --remove-orphans
     ;;
   *)

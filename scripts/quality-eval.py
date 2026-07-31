@@ -14,6 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.env_utils import is_private_regular_file, load_env_defaults
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from env_utils import is_private_regular_file, load_env_defaults
+    from local_http import direct_urlopen
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT_DIR / "quality" / "cases.json"
@@ -21,14 +28,9 @@ DEFAULT_SECRETS = ROOT_DIR / "profiles" / "operations.secrets.env"
 
 
 def load_env(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key, value.strip().strip("'\""))
+    if path.exists() and not is_private_regular_file(path):
+        raise RuntimeError(f"unsafe private environment file: {path}")
+    load_env_defaults(path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +70,7 @@ def request_message(base_url: str, token: str, case: dict[str, Any]) -> tuple[di
         method="POST",
     )
     started = time.monotonic()
-    with urllib.request.urlopen(request, timeout=600) as response:
+    with direct_urlopen(request, timeout=600) as response:
         body = json.load(response)
     return body, (time.monotonic() - started) * 1000
 

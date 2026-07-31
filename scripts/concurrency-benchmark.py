@@ -9,6 +9,11 @@ import os
 import time
 import urllib.request
 
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
+
 
 BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://127.0.0.1:18080")
 CONCURRENCY = int(os.environ.get("BENCHMARK_CONCURRENCY", "2"))
@@ -38,7 +43,7 @@ def complete(index: int) -> int:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=600) as response:
+    with direct_urlopen(request, timeout=600) as response:
         body = json.load(response)
     completion_tokens = int(body.get("usage", {}).get("completion_tokens", 0))
     if completion_tokens != MAX_TOKENS:

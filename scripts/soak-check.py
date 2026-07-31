@@ -6,13 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -128,7 +133,7 @@ def latest_backup_age_hours() -> tuple[float | None, bool]:
 
 def endpoint_ok(url: str) -> bool:
     try:
-        with urlopen(url, timeout=5) as response:
+        with direct_urlopen(url, timeout=5) as response:
             return 200 <= response.status < 300
     except OSError:
         return False
@@ -137,9 +142,9 @@ def endpoint_ok(url: str) -> bool:
 def evaluate(minimum_hours: float) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     container_names = [
-        "qwen35-9b-q5km",
-        "modelport-modelport-1",
-        "modelport-postgres-1",
+        os.environ.get("QWEN_CONTAINER_NAME", "qwen35-9b-q5km"),
+        os.environ.get("MODELPORT_CONTAINER_NAME", "modelport-modelport-1"),
+        os.environ.get("MODELPORT_POSTGRES_CONTAINER_NAME", "modelport-postgres-1"),
     ]
     try:
         containers = run_json(["docker", "inspect", *container_names])
@@ -169,7 +174,13 @@ def evaluate(minimum_hours: float) -> dict[str, Any]:
 
     add_check(checks, "Qwen health endpoint", endpoint_ok("http://127.0.0.1:18080/health"), "reachable", "HTTP 2xx")
     add_check(checks, "ModelPort liveness endpoint", endpoint_ok("http://127.0.0.1:38082/livez"), "reachable", "HTTP 2xx")
-    add_check(checks, "operations dashboard endpoint", endpoint_ok("http://127.0.0.1:33004/healthz"), "reachable", "HTTP 2xx")
+    add_check(
+        checks,
+        "operations dashboard endpoint",
+        endpoint_ok("http://127.0.0.1:33004/api/health"),
+        "reachable",
+        "HTTP 2xx",
+    )
 
     report_window = report_evidence(minimum_hours)
     add_check(

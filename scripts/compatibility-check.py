@@ -105,9 +105,19 @@ def evaluate_contract(
     tool_contract = capabilities["toolUse"]
     check("Tool Use enabled", tool_use.get("supported"), tool_contract["supported"])
     check(
+        "Tool Choice enabled",
+        tool_use.get("tool_choice"),
+        tool_contract["toolChoice"],
+    )
+    check(
         "parallel Tool Use",
         tool_use.get("parallel_tool_calls"),
         tool_contract["parallelToolCalls"],
+    )
+    check(
+        "streaming Tool Use arguments",
+        tool_use.get("streaming_arguments"),
+        tool_contract["streamingArguments"],
     )
     check(
         "Tool Use response validation",
@@ -132,7 +142,60 @@ def evaluate_contract(
         token_counting.get("recommended_reasoning_input_tokens"),
         limits["recommendedReasoningInputTokens"],
     )
+    model_input_limits = token_counting.get("model_recommended_input_tokens", {})
+    for alias, profile in logical_models.items():
+        check(
+            f"recommended input {alias}",
+            model_input_limits.get(alias),
+            profile.get("recommendedWorkingSetTokens"),
+        )
+    check(
+        "provider output limit",
+        token_counting.get("max_output_tokens"),
+        limits["maxOutputTokens"],
+    )
+    model_output_limits = token_counting.get("model_max_output_tokens", {})
+    for alias, profile in logical_models.items():
+        check(
+            f"output limit {alias}",
+            model_output_limits.get(alias),
+            profile.get("maxOutputTokens"),
+        )
     return checks
+
+
+def evaluate_governance_source(
+    contract: dict[str, Any], modelport_project: Path
+) -> list[dict[str, Any]]:
+    governance = contract["governance"]
+    source_paths = [
+        modelport_project / "src" / "governance.rs",
+        modelport_project / "src" / "routes.rs",
+    ]
+    source = "\n".join(
+        path.read_text(encoding="utf-8") if path.is_file() else ""
+        for path in source_paths
+    )
+    expected_fragments = {
+        "routing request header": governance["routingModeHeader"],
+        "routing response header": governance["routingModeResponseHeader"],
+        "classification header": governance["classificationHeader"],
+        "per-user executing limit": "DEFAULT_LOCAL_EXECUTING_PER_USER: usize = 1",
+        "per-user queue limit": "DEFAULT_LOCAL_QUEUED_PER_USER: usize = 2",
+        "global interactive queue": "DEFAULT_LOCAL_QUEUE_GLOBAL: usize = 16",
+        "hybrid overflow": "DEFAULT_OVERFLOW_AFTER: Duration = Duration::from_secs(5)",
+        "strict local wait": "DEFAULT_STRICT_WAIT: Duration = Duration::from_secs(60)",
+        "batch traffic class": '"batch" => Some(Self::Batch)',
+    }
+    return [
+        {
+            "name": name,
+            "passed": fragment in source,
+            "actual": "present" if fragment in source else "missing",
+            "expected": "present",
+        }
+        for name, fragment in expected_fragments.items()
+    ]
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,6 +203,14 @@ def parse_args() -> argparse.Namespace:
         description="compare ModelPort configuration and release state with the local-Qwen contract"
     )
     parser.add_argument("--modelport-project", type=Path, required=True)
+    parser.add_argument(
+        "--modelport-config",
+        type=Path,
+        help=(
+            "configuration to validate; relative paths are resolved inside "
+            "--modelport-project (default: config.toml)"
+        ),
+    )
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
@@ -154,13 +225,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     modelport_project = args.modelport_project.resolve()
-    config_path = modelport_project / "config.toml"
+    config_path = args.modelport_config or Path("config.toml")
+    if not config_path.is_absolute():
+        config_path = modelport_project / config_path
+    config_path = config_path.resolve()
     if not config_path.is_file():
         raise SystemExit(f"ModelPort config not found: {config_path}")
 
     contract = load_json(args.contract)
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     checks = evaluate_contract(contract, config)
+    checks.extend(evaluate_governance_source(contract, modelport_project))
 
     if args.release:
         manifest = load_json(args.manifest)
@@ -198,6 +273,11 @@ def main() -> int:
         "mode": "release" if args.release else "configuration",
         "status": "passed" if not failed else "failed",
         "summary": {"passed": len(checks) - len(failed), "failed": len(failed)},
+        "inputs": {
+            "contract": str(args.contract.resolve()),
+            "modelportProject": str(modelport_project),
+            "modelportConfig": str(config_path),
+        },
         "checks": checks,
     }
     if args.json:

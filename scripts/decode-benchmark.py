@@ -8,6 +8,11 @@ import os
 import time
 import urllib.request
 
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
+
 
 BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://127.0.0.1:18080")
 MAX_TOKENS = int(os.environ.get("DECODE_BENCHMARK_TOKENS", "512"))
@@ -24,7 +29,7 @@ def post(path: str, payload: dict, timeout: int = 1800) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with direct_urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 

@@ -10,7 +10,11 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -39,7 +43,7 @@ def command_json(*command: str) -> Any:
 
 
 def get_json(url: str) -> Any:
-    with urlopen(url, timeout=10) as response:
+    with direct_urlopen(url, timeout=10) as response:
         return json.load(response)
 
 
@@ -412,6 +416,16 @@ def main() -> int:
         "runtime controller SHA256",
         sha256(ROOT_DIR / "scripts" / "runtime.sh"),
         configuration["runtimeControllerSha256"],
+    )
+    check(
+        "runtime supervisor SHA256",
+        sha256(ROOT_DIR / "scripts" / "runtime-supervisor.py"),
+        configuration["runtimeSupervisorSha256"],
+    )
+    check(
+        "Python version pin SHA256",
+        sha256(ROOT_DIR / ".python-version"),
+        configuration["pythonVersionSha256"],
     )
     check(
         "candidate runtime SHA256",

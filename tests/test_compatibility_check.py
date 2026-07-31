@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import unittest
+import tempfile
 from pathlib import Path
 
 
@@ -48,7 +49,9 @@ class CompatibilityContractTests(unittest.TestCase):
                     },
                     "tool_use": {
                         "supported": True,
+                        "tool_choice": True,
                         "parallel_tool_calls": True,
+                        "streaming_arguments": "best_effort",
                         "response_validation": "strict",
                         "repair_invalid_arguments": True,
                     },
@@ -56,6 +59,15 @@ class CompatibilityContractTests(unittest.TestCase):
                         "mode": "anthropic",
                         "context_tokens": 131072,
                         "recommended_reasoning_input_tokens": 94208,
+                        "model_recommended_input_tokens": {
+                            name: profile["recommendedWorkingSetTokens"]
+                            for name, profile in logical.items()
+                        },
+                        "max_output_tokens": 32768,
+                        "model_max_output_tokens": {
+                            name: profile["maxOutputTokens"]
+                            for name, profile in logical.items()
+                        },
                     },
                 }
             },
@@ -83,6 +95,39 @@ class CompatibilityContractTests(unittest.TestCase):
             {item["name"] for item in failed},
             {"reasoning enabled qwen3.5-code", "Tool Use response validation"},
         )
+
+    def test_output_limit_drift_fails(self) -> None:
+        provider = self.config["providers"][self.contract["provider"]]
+        provider["token_counting"]["max_output_tokens"] = 65536
+        provider["token_counting"]["model_max_output_tokens"]["qwen3.5-code"] = 32768
+
+        failed = {
+            item["name"]
+            for item in compatibility.evaluate_contract(self.contract, self.config)
+            if not item["passed"]
+        }
+
+        self.assertEqual(
+            failed,
+            {"provider output limit", "output limit qwen3.5-code"},
+        )
+
+    def test_governance_source_contract_detects_missing_queue_or_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            (project / "src").mkdir()
+            (project / "src" / "governance.rs").write_text(
+                "DEFAULT_LOCAL_EXECUTING_PER_USER: usize = 1\n",
+                encoding="utf-8",
+            )
+            (project / "src" / "routes.rs").write_text("", encoding="utf-8")
+
+            checks = compatibility.evaluate_governance_source(self.contract, project)
+
+        failed = {item["name"] for item in checks if not item["passed"]}
+        self.assertIn("routing request header", failed)
+        self.assertIn("strict local wait", failed)
+        self.assertNotIn("per-user executing limit", failed)
 
 
 if __name__ == "__main__":

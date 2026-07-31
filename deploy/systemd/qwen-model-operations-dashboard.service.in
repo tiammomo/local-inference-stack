@@ -10,13 +10,12 @@ WorkingDirectory=@PROJECT_ROOT@
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
 EnvironmentFile=-@PROJECT_ROOT@/profiles/deployment.local.env
-EnvironmentFile=@PROJECT_ROOT@/profiles/operations.secrets.env
 EnvironmentFile=@PROJECT_ROOT@/profiles/operations.env
-EnvironmentFile=-@PROJECT_ROOT@/profiles/backup.local.env
 ExecStartPre=@PROJECT_ROOT@/scripts/production-alert.sh clear qwen-model-operations-dashboard.service
 ExecStart=/usr/bin/python3 @PROJECT_ROOT@/scripts/operations-dashboard.py --host 127.0.0.1 --port 33004
 Restart=on-failure
 RestartSec=3s
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -26,6 +25,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 

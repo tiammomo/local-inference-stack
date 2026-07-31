@@ -2,9 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROFILE_FILE="${MODELPORT_BACKUP_PROFILE_FILE:-$ROOT_DIR/profiles/backup.local.env}"
+PROFILE_FILE="${MODELPORT_BACKUP_PROFILE_FILE:-}"
+if [[ -z "$PROFILE_FILE" && -n "${CREDENTIALS_DIRECTORY:-}" \
+  && -f "$CREDENTIALS_DIRECTORY/backup.env" ]]; then
+  PROFILE_FILE="$CREDENTIALS_DIRECTORY/backup.env"
+fi
+PROFILE_FILE="${PROFILE_FILE:-$ROOT_DIR/profiles/backup.local.env}"
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
 
 if [[ -f "$PROFILE_FILE" ]]; then
+  validate_private_env_file "$PROFILE_FILE"
   set -a
   # shellcheck disable=SC1090
   source "$PROFILE_FILE"

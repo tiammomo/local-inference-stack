@@ -32,11 +32,18 @@ jobs:
     timeout-minutes: 10
     env:
       REQUIRE_GITLEAKS: "true"
+      REQUIRE_NODE: "true"
+      REQUIRE_SHELLCHECK: "true"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Pull pinned secret scanner
         run: docker pull zricethezav/gitleaks@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0
       - name: Validate catalog, tests, scripts, Compose, and portability

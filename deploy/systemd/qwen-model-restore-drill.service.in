@@ -8,15 +8,23 @@ OnFailure=qwen-model-production-alert@%n.service
 Type=oneshot
 WorkingDirectory=@PROJECT_ROOT@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
-EnvironmentFile=@PROJECT_ROOT@/profiles/backup.local.env
+@BACKUP_CREDENTIAL_DIRECTIVE@
 ExecStartPre=@PROJECT_ROOT@/scripts/production-alert.sh clear qwen-model-restore-drill.service
 ExecStart=@PROJECT_ROOT@/scripts/modelport-backup.sh drill
 Nice=15
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=@PROJECT_ROOT@/logs/alerts
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=default.target

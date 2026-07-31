@@ -5,6 +5,7 @@ import json
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -31,6 +32,23 @@ soak_check = load_module("soak_check_test", ROOT / "scripts" / "soak-check.py")
 
 
 class OperationsReportTests(unittest.TestCase):
+    def test_operations_contract_keeps_upstream_least_privilege_gap_explicit(self) -> None:
+        contract = json.loads(
+            (ROOT / "contracts" / "modelport-operations-v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertFalse(
+            contract["authorization"]["currentAdapterIsLeastPrivilege"]
+        )
+        self.assertEqual(
+            contract["authorization"]["requiredScope"],
+            "operations:aggregate:read",
+        )
+        self.assertFalse(
+            contract["migrationGate"]["dashboardCredentialAccessAllowed"]
+        )
+
     def test_docker_nanosecond_timestamp_is_parsed_for_soak_gate(self) -> None:
         parsed = soak_check.parse_docker_time("2026-07-19T11:38:11.052738421Z")
         self.assertEqual(parsed.microsecond, 52_738)
@@ -132,13 +150,60 @@ class OperationsReportTests(unittest.TestCase):
         self.assertEqual(summary["repairRecoveries"], 1)
         self.assertEqual(summary["repairRecoveryRate"], 1.0)
 
+    def test_readiness_payload_is_interpreted_fail_closed(self) -> None:
+        self.assertTrue(report.modelport_ready({"status": "ok"}))
+        self.assertTrue(report.modelport_ready({"ready": True}))
+        self.assertFalse(report.modelport_ready({"ready": False, "detail": "starting"}))
+        self.assertFalse(report.modelport_ready({"message": "not ready"}))
+        self.assertFalse(report.modelport_ready("ready"))
+
+    def test_terminal_reason_output_is_bounded(self) -> None:
+        self.assertEqual(
+            report.bounded_terminal_reason({"terminalReason": "completed"}),
+            "completed",
+        )
+        self.assertEqual(
+            report.bounded_terminal_reason(
+                {"terminalReason": "raw upstream text containing customer data"}
+            ),
+            "other",
+        )
+
 
 class HistoryStoreTests(unittest.TestCase):
-    def test_dashboard_report_arguments_include_production_thresholds(self) -> None:
-        args = dashboard.DashboardState._args(object(), 24.0)
-        self.assertEqual(args.disk_free_percent_warn, 10.0)
-        self.assertEqual(args.disk_free_bytes_warn, 20 * 1024**3)
-        self.assertEqual(args.backup_max_age_hours, 36.0)
+    def test_dashboard_rejects_dns_rebinding_host_header(self) -> None:
+        handler = object.__new__(dashboard.DashboardHandler)
+        handler.server = SimpleNamespace(server_address=("127.0.0.1", 33004))
+        handler.headers = {"Host": "attacker.example:33004"}
+        replies = []
+        handler.send_json = lambda payload, status: replies.append((payload, status))
+        self.assertFalse(handler.validate_host())
+        self.assertEqual(replies[0][0], {"error": "host rejected"})
+
+        handler.headers = {"Host": "localhost:33004"}
+        self.assertTrue(handler.validate_host())
+
+    def test_dashboard_accepts_only_matching_aggregate_snapshot(self) -> None:
+        snapshot = {
+            "schemaVersion": 1,
+            "generatedAtEpochMs": 1,
+            "privacy": {"mode": "aggregate-only"},
+            "window": {"hours": 24.0},
+        }
+        self.assertIs(
+            dashboard.DashboardState._validate_snapshot(snapshot, 24.0), snapshot
+        )
+        with self.assertRaises(RuntimeError):
+            dashboard.DashboardState._validate_snapshot(
+                {**snapshot, "privacy": {"mode": "raw"}}, 24.0
+            )
+
+    def test_dashboard_source_has_no_admin_credential_access(self) -> None:
+        source = (ROOT / "scripts" / "operations-dashboard.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("MODELPORT_ADMIN_USERNAME", source)
+        self.assertNotIn("MODELPORT_ADMIN_PASSWORD", source)
 
     def test_history_does_not_invent_ttft_without_stream_samples(self) -> None:
         point = dashboard.DashboardState._history_point(

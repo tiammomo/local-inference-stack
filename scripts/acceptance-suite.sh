@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-}"
 MODE="quick"
 RECORD="true"
+ACCEPTANCE_PROFILE="${QWEN_ACCEPTANCE_PROFILE:-latency}"
 STARTED_AT="$(date --iso-8601=seconds)"
 STARTED_EPOCH="$(date +%s)"
 CURRENT_STEP="initialization"
@@ -31,6 +32,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$ACCEPTANCE_PROFILE" != "latency" ]]; then
+  printf 'Host acceptance evidence is restricted to the validated latency profile.\n' >&2
+  exit 2
+fi
 
 if [[ "$RECORD" == "true" && "$MODE" != "help" ]]; then
   umask 077
@@ -61,7 +67,8 @@ record_exit() {
     --started-at "$STARTED_AT" \
     --finished-at "$finished_at" \
     --duration-seconds "$duration" \
-    --catalog-model-id "$QWEN_CATALOG_ID"; then
+    --catalog-model-id "$QWEN_CATALOG_ID" \
+    --profile "$ACCEPTANCE_PROFILE"; then
     printf 'Failed to write acceptance evidence.\n' >&2
     [[ $status -ne 0 ]] || status=1
   fi
@@ -91,12 +98,13 @@ quick_suite() {
   run_step "Local unit tests" "$ROOT_DIR/scripts/unit-tests.sh"
   run_step "Artifact integrity" "$ROOT_DIR/scripts/verify-models.sh" --active --cached
   run_step "Runtime status" "$ROOT_DIR/scripts/runtime.sh" status
+  run_step "Canonical runtime profile" \
+    "$ROOT_DIR/scripts/runtime.sh" assert-profile "$ACCEPTANCE_PROFILE"
   run_step "Direct generation" "$ROOT_DIR/scripts/smoke-test.sh"
   run_step "Direct reasoning" "$ROOT_DIR/scripts/reasoning-smoke.sh"
 }
 
 standard_suite() {
-  quick_suite
   if [[ "$QWEN_CATALOG_ID" != "qwen35-9b-q5km" ]]; then
     printf 'standard currently validates the versioned ModelPort contract for qwen35-9b-q5km; selected=%s\n' "$QWEN_CATALOG_ID" >&2
     exit 2
@@ -105,6 +113,12 @@ standard_suite() {
     printf 'standard requires MODELPORT_PROJECT_DIR pointing to a compatible ModelPort checkout.\n' >&2
     exit 2
   fi
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'standard requires Linux Node.js on PATH for ModelPort checks (Node 24 recommended).\n' >&2
+    printf 'With NVM, run: source "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm use 24\n' >&2
+    exit 2
+  fi
+  quick_suite
   run_step "Cross-repository provider contract" \
     python3 "$ROOT_DIR/scripts/compatibility-check.py" \
       --modelport-project "$MODELPORT_DIR"

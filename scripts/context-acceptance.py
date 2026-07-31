@@ -8,6 +8,11 @@ import os
 import time
 import urllib.request
 
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
+
 
 CONTEXT_BACKEND = os.environ.get("CONTEXT_BACKEND", "llama")
 LLAMA_BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://127.0.0.1:18080")
@@ -39,7 +44,7 @@ def post(
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with direct_urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 

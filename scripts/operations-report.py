@@ -10,7 +10,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from collections import Counter, defaultdict
 from http.cookiejar import CookieJar
@@ -18,7 +17,14 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
+from urllib.request import Request
+
+try:
+    from scripts.env_utils import atomic_write_private_text
+    from scripts.local_http import direct_opener, direct_urlopen, validate_loopback_url
+except ModuleNotFoundError:
+    from env_utils import atomic_write_private_text
+    from local_http import direct_opener, direct_urlopen, validate_loopback_url
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -119,9 +125,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def request_bytes(url: str, headers: dict[str, str] | None = None) -> bytes:
+    validate_loopback_url(url)
     request = Request(url, headers=headers or {})
     try:
-        with urlopen(request, timeout=10) as response:
+        with direct_urlopen(request, timeout=10) as response:
             return response.read()
     except (HTTPError, URLError, TimeoutError) as error:
         raise RuntimeError(f"GET {url} failed: {error}") from error
@@ -134,7 +141,8 @@ def request_json(url: str, headers: dict[str, str] | None = None) -> Any:
 class AdminClient:
     def __init__(self, base_url: str, username: str, password: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        validate_loopback_url(self.base_url)
+        self.opener = direct_opener(CookieJar())
         payload = json.dumps({"username": username, "password": password}).encode("utf-8")
         request = Request(
             f"{self.base_url}/admin/auth/login",
@@ -202,6 +210,35 @@ def classify_issue(row: dict[str, Any]) -> str:
         if re.search(pattern, text):
             return category
     return "other"
+
+
+def modelport_ready(document: Any) -> bool:
+    """Interpret readiness payloads fail-closed instead of relying on truthiness."""
+    if isinstance(document, bool):
+        return document
+    if not isinstance(document, dict):
+        return False
+    for key in ("ready", "ok"):
+        if isinstance(document.get(key), bool):
+            return document[key]
+    status = document.get("status")
+    return isinstance(status, str) and status.lower() in {"ready", "ok", "healthy"}
+
+
+def bounded_terminal_reason(row: dict[str, Any]) -> str:
+    reason = str(row.get("terminalReason") or "unknown")
+    allowed = {
+        "completed",
+        "downstream_cancelled",
+        "upstream_error",
+        "upstream_timeout",
+        "request_timeout",
+        "client_error",
+        "gateway_error",
+        "tool_protocol_error",
+        "unknown",
+    }
+    return reason if reason in allowed else "other"
 
 
 def dimension_summary(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
@@ -634,15 +671,7 @@ def selected_ledger_signals(value: Any) -> dict[str, int]:
 
 
 def atomic_write(path: Path, body: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, delete=False
-    ) as handle:
-        handle.write(body)
-        handle.write("\n")
-        temporary = Path(handle.name)
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    atomic_write_private_text(path, body.rstrip("\n") + "\n")
 
 
 def build_report(
@@ -669,7 +698,7 @@ def build_report(
     candidate_rows = (
         loaded_rows
         if args.include_synthetic
-        else [row for row in loaded_rows if row not in synthetic_rows]
+        else [row for row in loaded_rows if not is_synthetic_traffic(row)]
     )
     included_providers = {
         str(value) for value in (getattr(args, "provider", None) or []) if value
@@ -691,8 +720,10 @@ def build_report(
             or str(row.get("resolvedModel") or "") in included_models
         )
     ]
-    ready = request_json(
-        f"{args.modelport_url.rstrip('/')}/readyz", {"x-api-key": auth_token}
+    ready = modelport_ready(
+        request_json(
+            f"{args.modelport_url.rstrip('/')}/readyz", {"x-api-key": auth_token}
+        )
     )
     ledger = admin.get_json("/admin/enterprise/overview")
     ledger_signals = selected_ledger_signals(ledger)
@@ -730,7 +761,7 @@ def build_report(
     issue_counts = Counter(
         classify_issue(row) for row in rows if row.get("status") != "success"
     )
-    terminal_reasons = Counter(str(row.get("terminalReason") or "unknown") for row in rows)
+    terminal_reasons = Counter(bounded_terminal_reason(row) for row in rows)
 
     total_input = sum(int(row.get("inputTokens") or 0) for row in rows)
     total_output = sum(int(row.get("outputTokens") or 0) for row in rows)
@@ -853,7 +884,7 @@ def build_report(
             "truncated": available > len(loaded_rows),
         },
         "health": {
-            "modelportReady": bool(ready),
+            "modelportReady": ready,
             "qwenHealthy": qwen["healthy"],
             "ledgerSignals": ledger_signals,
             "unreconciledAcknowledgedBaseline": args.unreconciled_baseline,

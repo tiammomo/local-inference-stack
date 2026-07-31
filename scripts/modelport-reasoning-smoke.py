@@ -7,6 +7,11 @@ import json
 import os
 import urllib.request
 
+try:
+    from scripts.local_http import direct_urlopen
+except ModuleNotFoundError:
+    from local_http import direct_urlopen
+
 
 BASE_URL = os.environ.get(
     "MODELPORT_BASE_URL",
@@ -43,7 +48,7 @@ def complete(model: str, thinking: dict, max_tokens: int) -> tuple[str, dict]:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=600) as response:
+    with direct_urlopen(request, timeout=600) as response:
         body = json.load(response)
     text = "".join(
         block.get("text", "")

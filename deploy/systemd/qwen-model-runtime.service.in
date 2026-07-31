@@ -1,18 +1,38 @@
 [Unit]
-Description=Reconcile the selected local inference runtime after login or boot
-After=network-online.target docker.service
+Description=Supervise the selected local inference runtime after login or boot
+After=network-online.target
 Wants=network-online.target
 OnFailure=qwen-model-production-alert@%n.service
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
+Type=simple
 WorkingDirectory=@PROJECT_ROOT@
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PATH=@PYTHON_BIN_DIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
 Environment=QWEN_BOOT_PROFILE=latency
-ExecStartPre=@PROJECT_ROOT@/scripts/production-alert.sh clear qwen-model-runtime.service
-ExecStart=@PROJECT_ROOT@/scripts/runtime-reconcile.sh
-RemainAfterExit=yes
-TimeoutStartSec=10m
+Environment=QWEN_DOCKER_RETRY_SECONDS=60
+Environment=QWEN_DOCKER_ALERT_SECONDS=600
+Environment=QWEN_RUNTIME_HEALTH_SECONDS=300
+Environment=QWEN_RUNTIME_START_POLL_SECONDS=10
+ExecStart=@PYTHON_EXECUTABLE@ @PROJECT_ROOT@/scripts/runtime-supervisor.py
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=60s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@PROJECT_ROOT@/cache @PROJECT_ROOT@/logs/alerts
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=default.target

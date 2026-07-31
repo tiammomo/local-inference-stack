@@ -13,11 +13,38 @@ fi
 
 cd "$ROOT_DIR"
 git diff --check
-python3 -m json.tool catalog/models.json >/dev/null
+git diff --cached --check
+while IFS= read -r document; do
+  python3 -m json.tool "$document" >/dev/null
+done < <(git ls-files -co --exclude-standard -- '*.json')
+python3 -m compileall -q src scripts tests
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash -n scripts/*.sh scripts/lib/*.sh
-docker compose --env-file profiles/latency.env config --quiet
-docker compose --env-file profiles/latency.env config --format json \
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck scripts/*.sh scripts/lib/*.sh
+elif [[ "${REQUIRE_SHELLCHECK:-false}" == "true" ]]; then
+  printf 'shellcheck is required but not installed.\n' >&2
+  exit 1
+else
+  printf 'NOTE: shellcheck is not installed; shell lint skipped.\n'
+fi
+if command -v node >/dev/null 2>&1; then
+  node --check dashboard/app.js
+elif [[ "${REQUIRE_NODE:-false}" == "true" ]]; then
+  printf 'node is required but not installed.\n' >&2
+  exit 1
+else
+  printf 'NOTE: node is not installed; dashboard syntax check skipped.\n'
+fi
+python3 scripts/check-doc-links.py
+./stack config check --json >/dev/null
+./stack reference --check --json >/dev/null
+python3 scripts/install-user-services.py --check
+python3 -c 'from scripts.runtime_identity import rendered_compose; rendered_compose("latency")' \
+  >/dev/null
+python3 -c 'from scripts.runtime_identity import rendered_compose; rendered_compose("throughput")' \
+  >/dev/null
+python3 -c 'from scripts.runtime_identity import rendered_compose; import json; print(json.dumps(rendered_compose("latency")))' \
   | python3 -c '
 import json
 import sys
@@ -40,9 +67,21 @@ assert service["container_name"] == "qwen35-9b-candidate", service["container_na
 assert port["host_ip"] == "127.0.0.1", port
 assert str(port["published"]) == "18081", port
 '
+python3 scripts/verify-manifest.py
 python3 scripts/model-manager.py plan --json >/dev/null
+./stack plan --json >/dev/null
 
-forbidden="$(git ls-files | rg '(^|/)(\.env|.*\.gguf|.*\.part|operations\.secrets\.env|deployment\.local\.env)$' || true)"
+ignored_tracked="$(git ls-files -ci --exclude-standard || true)"
+if [[ -n "$ignored_tracked" ]]; then
+  printf 'Tracked files unexpectedly match .gitignore:\n%s\n' "$ignored_tracked" >&2
+  exit 1
+fi
+
+if command -v rg >/dev/null 2>&1 && rg --version >/dev/null 2>&1; then
+  forbidden="$(git ls-files | rg '(^|/)(\.env|.*\.gguf|.*\.part|operations\.secrets\.env|deployment\.local\.env)$' || true)"
+else
+  forbidden="$(git ls-files | grep -E '(^|/)(\.env|.*\.gguf|.*\.part|operations\.secrets\.env|deployment\.local\.env)$' || true)"
+fi
 if [[ -n "$forbidden" ]]; then
   printf 'Forbidden tracked local artifacts:\n%s\n' "$forbidden" >&2
   exit 1
@@ -55,7 +94,11 @@ if [[ -n "$secret_files" ]]; then
 fi
 
 home_prefix="/""home/"
-absolute_home_files="$(rg -l "${home_prefix}[^/ ]+" README.md AGENTS.md docs scripts deploy catalog compose.yaml || true)"
+if command -v rg >/dev/null 2>&1 && rg --version >/dev/null 2>&1; then
+  absolute_home_files="$(rg -l "${home_prefix}[^/ ]+" README.md AGENTS.md docs scripts deploy catalog compose.yaml || true)"
+else
+  absolute_home_files="$(grep -RIlE "${home_prefix}[^/ ]+" README.md AGENTS.md docs scripts deploy catalog compose.yaml || true)"
+fi
 if [[ -n "$absolute_home_files" ]]; then
   printf 'Non-portable absolute home paths found in public project files:\n%s\n' "$absolute_home_files" >&2
   exit 1

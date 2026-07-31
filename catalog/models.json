@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-26",
+  "updatedAt": "2026-08-01",
   "scope": "Curated NVIDIA CUDA / llama.cpp text deployments; estimates are conservative starting points, not benchmarks.",
   "artifactPolicy": {
     "modelAuthor": "Qwen",
@@ -155,7 +155,7 @@
       },
       "modelDirectory": "qwen3.5-9b",
       "servedModelId": "qwen3.5-9b-q5km",
-      "requirements": {"minVramGiB": 14, "recommendedVramGiB": 16, "minRamGiB": 32, "minFreeDiskGiB": 9},
+      "requirements": {"minVramGiB": 12, "recommendedVramGiB": 16, "minRamGiB": 32, "minFreeDiskGiB": 9},
       "runtime": {"contextTokens": 131072, "recommendedInputTokens": 94208, "maxOutputTokens": 32768, "cacheRamMiB": 8192, "batchSize": 2048, "ubatchSize": 1024},
       "artifacts": [
         {
