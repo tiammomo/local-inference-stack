@@ -1,0 +1,11 @@
+title = "Local Inference Stack gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deployment manifest secrets provisioner SHA-256"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^deployments/[^/]+/manifest\.json$''']
+regexes = ['''secretsProvisionerSha256"\s*:\s*"[0-9a-f]{64}"''']

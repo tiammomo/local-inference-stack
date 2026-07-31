@@ -47,6 +47,7 @@ CONFIGURATION_FILES = {
     "candidateRuntimeSha256": "scripts/candidate-runtime.sh",
     "releaseCandidateSha256": "scripts/release-candidate.sh",
     "releaseCheckSha256": "scripts/release-check.sh",
+    "gitleaksConfigSha256": ".gitleaks.toml",
     "docLinkCheckSha256": "scripts/check-doc-links.py",
     "deploymentLibrarySha256": "scripts/lib/deployment.sh",
     "deploymentVerifierSha256": "scripts/verify-deployment.py",
