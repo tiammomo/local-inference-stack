@@ -9,14 +9,15 @@ Q8_0 KV。其他 Catalog 条目是保守估算，必须在目标主机重新验�
 ## 快速开始
 
 要求：Linux/WSL x86_64、NVIDIA GPU/驱动、NVIDIA Container Toolkit、
-Docker Compose v2、Python 3.11+ 和 `curl`。
+Docker Compose v2、uv、Python 3.11+、`curl` 和 util-linux `flock`。仓库的已验证开发与
+用户服务基线由 `.python-version` 固定为 uv-managed CPython 3.14.6；最低兼容门槛仍是 3.11。
 
 ```bash
 git clone git@github.com:tiammomo/local-inference-stack.git
 cd local-inference-stack
 
 # 唯一默认动作：只读，不下载、不启动、不改配置
-./scripts/model-manager.py plan --json
+./stack plan --json
 ```
 
 先检查推荐模型、`evidenceStatus`、`hostAcceptanceStatus`、下载大小、固定 revision、
@@ -25,14 +26,13 @@ cd local-inference-stack
 
 ```bash
 MODEL_ID=qwen35-9b-q5km # 替换为 plan 返回的 id
-./scripts/model-manager.py download --model "$MODEL_ID" --yes
-./scripts/model-manager.py select --model "$MODEL_ID" --yes
-./scripts/runtime.sh start latency
-./scripts/acceptance-suite.sh quick
+./stack deploy --model "$MODEL_ID" --yes
 ```
 
-下载支持断点续传，只有精确字节数和 SHA256 匹配才会发布。`quick` 验证权重、
-运行态、生成和思考，并生成与本机及当前配置绑定的限时验收凭证。
+`./stack` 是稳定公共入口；`scripts/` 下的旧命令保留为高级诊断/兼容接口。下载支持断点续传，
+只有精确字节数和 SHA256 匹配才会发布。部署会重新执行主机准入，并由文件锁和持久事务双重
+串行化；`quick` 验证权重、实际容器配置、生成和思考，并生成与本机及当前有效配置绑定的限时
+schema v4 验收凭证。
 
 ## 使用与运维
 
@@ -48,11 +48,13 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 常用命令：
 
 ```bash
-./scripts/runtime.sh status
+./stack status
+./stack doctor
+./stack verify --scope config
+./stack storage report
+./stack credentials audit
 ./scripts/runtime.sh logs
-./scripts/model-manager.py verify --cached
-./scripts/acceptance-suite.sh quick
-./scripts/install-user-services.py --enable
+./scripts/install-user-services.py --runtime-only --enable
 ```
 
 应用长期接入可选 ModelPort Anthropic Messages 网关；业务工具的执行、审批、沙箱和
@@ -60,12 +62,16 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 
 ## 文档
 
+- [完整学习与实践指南](docs/LEARNING_GUIDE.md)
+- [项目优化路线图](docs/ROADMAP.md)
+- [架构决策：可信单机 Appliance](docs/decisions/0001-trusted-single-host-appliance.md)
 - [首次部署](docs/GETTING_STARTED.md)
 - [硬件与模型](docs/HARDWARE_GUIDE.md)
 - [架构与边界](docs/ARCHITECTURE.md)
 - [ModelPort 接入](docs/MODELPORT.md)
 - [验收](docs/ACCEPTANCE.md)
 - [运维与恢复](docs/OPERATIONS.md)
+- [控制面命令、schema 与退出码参考](docs/REFERENCE.md)
 - [当前验证档案](deployments/qwen3.5-9b-rtx5070ti/README.md)
 
 自动化操作约束见 [AGENTS.md](AGENTS.md)。

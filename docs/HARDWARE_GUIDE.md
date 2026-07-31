@@ -9,12 +9,16 @@
 | `qwen35-2b-q5km` | 4/6GB | 12GB | 32K | 估算 |
 | `qwen35-4b-q5km` | 6/8GB | 16GB | 64K | 估算 |
 | `qwen35-9b-q4km` | 10/12GB | 24GB | 64K | 估算 |
-| `qwen35-9b-q5km` | 14/16GB | 32GB | 128K | RTX 5070 Ti 已验证 |
+| `qwen35-9b-q5km` | 12/16GB | 32GB | 128K | RTX 5070 Ti 16GB 已验证；12–16GB 未验证 |
 | `qwen35-27b-q4km` | 22/24GB | 48GB | 32K | 估算 |
 | `qwen35-35b-a3b-q4km` | 28/32GB | 64GB | 32K | 估算 |
 
 精确大小、哈希和运行参数只以
 [`catalog/models.json`](../catalog/models.json) 为准。
+
+`qwen35-9b-q5km` 的 12GB 是部署准入下限，不是已验证的容量结论。当可用显存低于
+16GB 时，该配置仍是本机候选项，只有完成 `acceptance-suite.sh quick` 后才能视为
+在该主机可用。已记录的实机验证仍是 RTX 5070 Ti 16GB 档位。
 
 ## 非自动化场景
 

@@ -9,6 +9,9 @@
             └─ llama.cpp CUDA + 本地 GGUF
 
 本机诊断 ──> 127.0.0.1:18080/v1（OpenAI-compatible）
+
+凭据化 ModelPort 聚合读取 ──> 短生命周期 Collector
+  └─ aggregate-only JSON 快照 ──> 零凭据 Dashboard
 ```
 
 ModelPort 不是首次部署前置条件。应用负责真实工具执行、审批、沙箱、幂等和业务判断；
@@ -25,7 +28,9 @@ ModelPort 不是首次部署前置条件。应用负责真实工具执行、审�
 权威数据源：
 
 - `catalog/models.json`：模型、制品、哈希与容量；
-- `compose.yaml` + `profiles/`：运行配置；
+- `config/runtime-profiles.json`：运行 Profile 的类型化权威来源；
+- `profiles/*.env`：确定性派生文件，`./stack config check` 防止手改漂移；
+- `compose.yaml`：通用运行模板，其默认值受类型化配置校验；
 - `contracts/local-qwen-provider-v1.json`：跨仓库协议；
 - `deployments/*/manifest.json`：已验证部署身份。
 
@@ -49,3 +54,5 @@ ModelPort 不是首次部署前置条件。应用负责真实工具执行、审�
 - 运行时使用 OpenAI-compatible；Anthropic Messages 由可选 ModelPort 提供。
 - 生产保留 Q8_0 KV、单 Slot、文本模型和有界缓存；其他组合必须候选验收。
 - ModelPort 契约变更必须协调两个仓库，不能在本仓库复制其实现。
+- `cache/control-plane/transaction.json` 原子记录运行变更；任何未完成事务都会阻止下一次变更。
+- 本机 schema 只读兼容 N-1；升级必须显式迁移并保留回滚，不允许静默重写。

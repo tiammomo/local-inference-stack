@@ -8,21 +8,23 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 
 1. Read `README.md`, `docs/GETTING_STARTED.md`, `docs/HARDWARE_GUIDE.md`, and
    `catalog/models.json` before changing host state.
-2. Run `./scripts/model-manager.py plan --json`. This is the only default
-   first-run command: it is read-only and reports detected hardware,
+2. Run `./stack plan --json` (the compatibility implementation delegates to
+   `./scripts/model-manager.py plan --json`). This is the only default first-run
+   command: it is read-only and reports detected hardware,
    prerequisites, recommendation status, size, and next commands.
 3. Show the user the selected model, `evidenceStatus`, `hostAcceptanceStatus`,
    download size, immutable source revision, license metadata, SHA256 policy,
    context, current free VRAM, and caveats. Do not download, select, start, stop,
    or install services until the user explicitly approves those state changes.
-4. After approval, use only catalog-backed commands with `--yes`; never invent a
+4. After approval, prefer `./stack deploy --model CATALOG_ID --yes`; use only
+   catalog-backed commands with `--yes`; never invent a
    filename, URL, hash, hardware threshold, or unreviewed model entry.
 5. Run `./scripts/acceptance-suite.sh quick` after deployment. A recommendation
    marked `estimated` remains a candidate until it passes acceptance on that host.
 6. Record genuinely reusable host validation as a deployment manifest under
    `deployments/`; do not relabel estimates as validated.
 7. Treat `validated-on-this-host` as valid only when `hostAcceptanceEvidence`
-   points to a fresh, secure, matching schema v3 record. Hardware-profile
+   points to a fresh, secure, matching schema v4 record. Hardware-profile
    similarity alone is not host acceptance, and a busy running GPU may still
    make `readyToDeploy` false.
 

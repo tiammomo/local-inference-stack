@@ -27,3 +27,25 @@ python3 ./scripts/verify-deployment.py
 
 新主机、驱动、镜像、模型或配置变化后必须重新验收；不能复制本机凭证来继承
 `validated-on-this-host`。
+
+## 供应链与许可证审查（2026-08-01）
+
+- 上游模型固定为 `Qwen/Qwen3.5-9B@c202236235762e1c871ad0ccb60c8ee5ba337b9a`；
+  仓库元数据和固定 revision 的许可证文件标记 Apache-2.0：
+  <https://huggingface.co/Qwen/Qwen3.5-9B/blob/c202236235762e1c871ad0ccb60c8ee5ba337b9a/LICENSE>。
+- GGUF 来自第三方发布者 Unsloth，固定 revision
+  `3885219b6810b007914f3a7950a8d1b469d598a5`。该 revision 列出
+  `Qwen3.5-9B-Q5_K_M.gguf`，本机文件为 6,577,841,376 bytes、单硬链接、`0600`，并重新计算
+  SHA256 为 `dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c`：
+  <https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/tree/3885219b6810b007914f3a7950a8d1b469d598a5>。
+- llama.cpp CUDA 镜像固定 digest
+  `sha256:0d6c600a69e8bdaafd7b91ed6db9160906ee8148ee12a609cf4d52b4e17aabe8`。
+  本地 OCI 标签把镜像关联到官方源码 commit
+  `12127defda4f41b7679cb2477a4b0d65ee6a0c8f`（build `b10015`）；该 revision 的源码许可证为 MIT：
+  <https://github.com/ggml-org/llama.cpp/commit/12127defda4f41b7679cb2477a4b0d65ee6a0c8f>、
+  <https://github.com/ggml-org/llama.cpp/blob/12127defda4f41b7679cb2477a4b0d65ee6a0c8f/LICENSE>。
+
+结论：这些固定来源可接受用于可信单用户、loopback-only 的本机部署。风险仍包括第三方 GGUF
+量化过程未在本仓库复现、容器的 CUDA/Ubuntu 传递依赖，以及许可证适用性的组织/法律判断；
+因此 `licenseReviewRequired` 保持为 true。任何模型 revision、GGUF 哈希或镜像 digest 变化都必须
+重新审查和验收，不能自动追踪 latest。
