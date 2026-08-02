@@ -16,6 +16,7 @@ MANIFEST_PATH = (
 )
 CONFIGURATION_FILES = {
     "pythonVersionSha256": ".python-version",
+    "nodeVersionSha256": ".nvmrc",
     "composeSha256": "compose.yaml",
     "latencyProfileSha256": "profiles/latency.env",
     "candidateProfileSha256": "profiles/candidate.env",
@@ -49,6 +50,7 @@ CONFIGURATION_FILES = {
     "releaseCheckSha256": "scripts/release-check.sh",
     "gitleaksConfigSha256": ".gitleaks.toml",
     "docLinkCheckSha256": "scripts/check-doc-links.py",
+    "docCommandCheckSha256": "scripts/check-doc-commands.py",
     "deploymentLibrarySha256": "scripts/lib/deployment.sh",
     "deploymentVerifierSha256": "scripts/verify-deployment.py",
     "manifestVerifierSha256": "scripts/verify-manifest.py",
@@ -57,6 +59,11 @@ CONFIGURATION_FILES = {
     "localHttpSha256": "scripts/local_http.py",
     "runtimeIdentitySha256": "scripts/runtime_identity.py",
     "secretsProvisionerSha256": "scripts/provision-operations-secrets.py",
+    "environmentGuideSha256": "docs/ENVIRONMENT.md",
+    "apiGuideSha256": "docs/API.md",
+    "upgradingGuideSha256": "docs/UPGRADING.md",
+    "docsIndexSha256": "docs/README.md",
+    "contributingGuideSha256": "CONTRIBUTING.md",
     "learningGuideSha256": "docs/LEARNING_GUIDE.md",
     "controlPlaneReferenceSha256": "docs/REFERENCE.md",
     "runtimeProfilesSha256": "config/runtime-profiles.json",

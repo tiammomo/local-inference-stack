@@ -11,6 +11,7 @@ Q8_0 KV。其他 Catalog 条目是保守估算，必须在目标主机重新验�
 要求：Linux/WSL x86_64、NVIDIA GPU/驱动、NVIDIA Container Toolkit、
 Docker Compose v2、uv、Python 3.11+、`curl` 和 util-linux `flock`。仓库的已验证开发与
 用户服务基线由 `.python-version` 固定为 uv-managed CPython 3.14.6；最低兼容门槛仍是 3.11。
+ModelPort `standard/full` 是可选联合验收，并固定使用 `.nvmrc` 声明的 Linux Node.js 24。
 
 ```bash
 git clone git@github.com:tiammomo/local-inference-stack.git
@@ -21,8 +22,12 @@ cd local-inference-stack
 ```
 
 先检查推荐模型、`evidenceStatus`、`hostAcceptanceStatus`、下载大小、固定 revision、
-许可证、SHA256、空闲显存和 `caveats`。只有 `readyToDeploy=true` 且
-`nextCommands` 非空，并得到用户明确批准后，才执行：
+许可证、SHA256、空闲显存和 `caveats`。然后区分两种情况。
+
+### 新主机首次部署
+
+只有 `readyToDeploy=true` 且 `nextCommands` 非空，并得到用户明确批准后，
+才执行：
 
 ```bash
 MODEL_ID=qwen35-9b-q5km # 替换为 plan 返回的 id
@@ -34,6 +39,26 @@ MODEL_ID=qwen35-9b-q5km # 替换为 plan 返回的 id
 串行化；`quick` 验证权重、实际容器配置、生成和思考，并生成与本机及当前有效配置绑定的限时
 schema v4 验收凭证。
 
+### 已部署主机恢复运行
+
+不要因为模型已占用显存、`readyToDeploy=false` 就重复部署。先检查现有实例：
+
+```bash
+./stack doctor --json
+./stack status --json
+curl --noproxy '*' http://127.0.0.1:18080/health
+```
+
+若 `runtimeHealthy=true`、健康接口返回 `{"status":"ok"}`，项目已经在运行。此时 plan 中
+的低空闲显存是容量占用证据，只阻止新的部署动作。需要重新确认当前主机证据时运行：
+
+```bash
+./scripts/acceptance-suite.sh quick
+```
+
+完整的新机、已部署恢复和 WSL 自启流程见[首次部署](docs/GETTING_STARTED.md)与
+[运维与恢复](docs/OPERATIONS.md)。
+
 ## 使用与运维
 
 直连诊断 API 只监听 `127.0.0.1:18080`：
@@ -44,6 +69,8 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3.5-9b-q5km","messages":[{"role":"user","content":"你好"}],"max_tokens":512}'
 ```
+
+请求字段、流式响应、reasoning、Token/上下文边界和错误排查见 [API 使用](docs/API.md)。
 
 常用命令：
 
@@ -62,7 +89,11 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 
 ## 文档
 
+- [按角色浏览全部文档](docs/README.md)
 - [完整学习与实践指南](docs/LEARNING_GUIDE.md)
+- [环境、配置来源与安装边界](docs/ENVIRONMENT.md)
+- [API 使用](docs/API.md)
+- [升级与回滚](docs/UPGRADING.md)
 - [项目优化路线图](docs/ROADMAP.md)
 - [架构决策：可信单机 Appliance](docs/decisions/0001-trusted-single-host-appliance.md)
 - [首次部署](docs/GETTING_STARTED.md)
@@ -73,6 +104,7 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 - [运维与恢复](docs/OPERATIONS.md)
 - [控制面命令、schema 与退出码参考](docs/REFERENCE.md)
 - [当前验证档案](deployments/qwen3.5-9b-rtx5070ti/README.md)
+- [贡献指南](CONTRIBUTING.md)
 
 自动化操作约束见 [AGENTS.md](AGENTS.md)。
 

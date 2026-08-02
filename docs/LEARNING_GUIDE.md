@@ -10,7 +10,7 @@
 - 使用直接 llama.cpp API，或通过 ModelPort 接入应用；
 - 完成日常检查、故障恢复、候选发布和仓库变更验证。
 
-> 本文中的下载、选择、启动、停止和发布命令都会改变主机状态。第一次接触项目时只运行只读的 `plan --json`。当 `readyToDeploy=false` 或 `nextCommands` 为空时，必须停止，不能绕过门禁。
+> 本文中的下载、选择、启动、停止和发布命令都会改变主机状态。第一次接触项目时只运行只读的 `plan --json`。当 `readyToDeploy=false` 或 `nextCommands` 为空时，必须停止新部署，不能绕过门禁；已有健康 runtime 是否正常应另行通过 `stack status` 判断。
 
 ## 1. 项目解决什么问题
 
@@ -142,7 +142,7 @@ schema v4 证据还绑定验收模式和 `latency` Profile。旧证据、配置�
 - 单张 NVIDIA GPU；
 - NVIDIA 驱动和 Container Toolkit；
 - Docker Engine 和 Docker Compose v2；
-- Python 3.11+；
+- uv 与 Python 3.11+；长期用户服务使用 `.python-version` 固定的 uv-managed Python；
 - `curl`；
 - util-linux 提供的 `flock`；
 - 满足 Catalog 要求的当前可用 RAM、空闲显存和磁盘。
@@ -226,12 +226,18 @@ MODEL_ID=qwen35-9b-q5km  # 必须替换为 plan 实际返回的 Catalog ID
 ### 7.1 日常命令
 
 ```bash
-./scripts/runtime.sh status
+./stack status --json
+./stack doctor --json
 ./scripts/runtime.sh logs
+./scripts/runtime.sh assert-profile latency
+```
+
+以下命令会改变 runtime，只在明确批准后使用：
+
+```bash
 ./scripts/runtime.sh restart
 ./stack profile throughput --yes
 ./stack profile latency --yes
-./scripts/runtime.sh assert-profile latency
 ./scripts/runtime.sh stop
 ```
 
@@ -257,7 +263,7 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 
 | 模式 | 覆盖范围 | 典型时机 |
 | --- | --- | --- |
-| `quick` | 单测、权重、运行身份、直接生成和思考 | 首次部署、普通运行/配置变更 |
+| `quick` | 单测、权重、运行身份、直接生成和思考 | 首次部署、WSL/Docker 恢复、普通运行/配置变更 |
 | `standard` | quick + ModelPort 契约、Token、Dashboard、Tool Use 和质量冒烟 | 协议、推理或 Tool Use 变更 |
 | `full` | standard + 完整哈希、长上下文、解码/并发性能、完整质量集 | 模型、量化、KV、上下文或镜像升级 |
 
@@ -303,7 +309,8 @@ ModelPort 与推理容器通过外部 Docker 网络通信，宿主机 `18080` �
 基础开机/登录恢复：
 
 ```bash
-./scripts/install-user-services.py --enable
+uv python install "$(tr -d '[:space:]' < .python-version)"
+./scripts/install-user-services.py --runtime-only --enable
 ```
 
 安装器同时安装 `OnFailure` 所需的告警模板。恢复服务会等待运行时真正健康后才成功。
@@ -444,7 +451,9 @@ docker info
 docker compose version
 ```
 
-如果是运行中的已知服务占用 GPU，先确认业务影响和维护授权；如果是未知进程、共享 GPU、多 GPU 或平台不受支持，停止自动部署并设计独立 Profile。
+如果 `./stack status --json` 显示已知 runtime 健康，则低空闲显存只是阻止再次部署；
+不要停止或重建健康容器。如果是未知进程、共享 GPU、多 GPU 或平台不受支持，停止
+自动部署并设计独立 Profile。
 
 ### 12.2 运行时不健康
 
@@ -554,13 +563,18 @@ python3 scripts/verify-manifest.py --json
 
 ## 15. 继续阅读
 
+- [文档导航](README.md)
 - [首次部署](GETTING_STARTED.md)
+- [环境与配置来源](ENVIRONMENT.md)
+- [API 使用](API.md)
 - [硬件与模型](HARDWARE_GUIDE.md)
 - [架构与边界](ARCHITECTURE.md)
 - [ModelPort 接入](MODELPORT.md)
 - [验收与发布](ACCEPTANCE.md)
 - [运维与恢复](OPERATIONS.md)
+- [升级与回滚](UPGRADING.md)
 - [控制面参考](REFERENCE.md)
+- [贡献指南](../CONTRIBUTING.md)
 - [当前验证档案](../deployments/qwen3.5-9b-rtx5070ti/README.md)
 - [Agent 操作约束](../AGENTS.md)
 

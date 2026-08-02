@@ -4,7 +4,7 @@
 
 | 模式 | 覆盖 | 何时运行 |
 | --- | --- | --- |
-| `quick` | 单测、活动权重、运行态、直连生成与思考 | 首次部署、普通本仓变更 |
+| `quick` | 单测、活动权重、运行态、直连生成与思考 | 首次部署、WSL/Docker 恢复、普通本仓变更 |
 | `standard` | quick + ModelPort 契约、Token、Dashboard、Tool Use、质量冒烟 | 协议、推理或 Tool 变更 |
 | `full` | standard + 完整哈希、长上下文、性能、完整质量集 | 模型、量化、KV、上下文、镜像升级 |
 
@@ -16,15 +16,44 @@ MODELPORT_PROJECT_DIR=/path/to/ModelPort ./scripts/acceptance-suite.sh full
 
 所有模式 fail-fast。`standard/full` 只支持当前版本化的 9B Provider 契约，并要求显式
 提供兼容 ModelPort checkout；它们还会调用 ModelPort 的 JavaScript 验收工具，因此
-Linux `node` 必须已在 `PATH` 中（推荐 Node 24）。使用 NVM 时先执行：
+Linux Node.js 必须匹配 `.nvmrc` 的 24 major。使用 NVM 时先执行：
 
 ```bash
 source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
-nvm use 24
+nvm install
+nvm use
 node --version
 ```
 
-验收会在模型推理前检查这些联合前置条件，缺失时立即退出。
+### standard/full 联合前置条件
+
+| 前置项 | 通过条件 | 典型修复 |
+| --- | --- | --- |
+| ModelPort checkout | `MODELPORT_PROJECT_DIR` 指向含联合验收脚本的兼容 checkout | 先运行双仓库 compatibility check |
+| Linux Node | `command -v node` 不是 `/mnt/...`，major 为 24 | 在仓库目录 `nvm install && nvm use` |
+| ModelPort runtime | loopback `http://127.0.0.1:38082/livez` 健康 | 按 ModelPort runbook 启动兼容版本 |
+| 调用凭据 | `profiles/operations.secrets.env` 含当前测试 token，权限保持私有 | 用 provision 脚本从受控来源刷新 |
+| 聚合快照 | `logs/operations/latest-{1,6,24,168}.json` 来自当前凭据和 contract | 短生命周期运行 Collector |
+| Dashboard | `127.0.0.1:33004` loopback 健康，24h status 满足契约 | 启动前台进程或 reviewed user unit |
+
+需要临时执行联合验收、但不希望常驻启用 operations units 时，可在已获准的测试窗口运行：
+
+```bash
+./scripts/provision-operations-secrets.py --source /path/to/ModelPort/.env
+
+set -a
+source profiles/operations.secrets.env
+set +a
+python3 scripts/operations-collector.py
+
+# 保持此前台进程运行，在另一个终端执行 standard/full
+python3 scripts/operations-dashboard.py
+```
+
+然后在第二个已执行 `nvm use` 的终端运行 `standard/full`。验收会在 quick 和模型请求前检查
+Node major、ModelPort `/livez` 以及 Dashboard 的 health/status 契约；缺失或快照不可读时立即退出，
+不会先消耗 GPU 测试时间。`401` 通常表示本地 operations 凭据已落后于 ModelPort 当前状态，应重新
+provision，不能把密码或 token 粘贴进命令、日志或文档。
 
 ## 本机凭证
 
@@ -39,6 +68,28 @@ node --version
 - 实际容器仍在运行且健康，镜像 ID、用户、命令、安全项、日志、端口和关键挂载没有漂移。
 
 复制到其他主机、配置漂移、过期或权限放宽都会使凭证失效。硬件档位匹配不能替代它。
+
+## 验收后如何解释 plan
+
+quick 通过后重新运行：
+
+```bash
+./stack plan --json
+./stack status --json
+```
+
+当前主机与配置完全匹配时，plan 会返回：
+
+- `evidenceStatus=validated-on-this-host`；
+- `hostAcceptanceStatus=passed-current-configuration`；
+- `hostAcceptanceEvidence` 指向当前安全的 schema v4 文件。
+
+这不保证 `readyToDeploy=true`。健康容器已占用 GPU 时，空闲显存会使
+`readyToDeploy=false` 且 `nextCommands=[]`，目的是阻止第二次部署。现有服务是否已恢复
+应以 `status.facts.runtimeHealthy`、`/health` 和 canonical Profile 检查为准。
+
+若 quick 失败，失败证据只用于诊断，不会升级本机状态。不要手工编辑 JSON、
+放宽权限或复制旧证据来获得 `validated-on-this-host`。
 
 ## 发布前检查
 

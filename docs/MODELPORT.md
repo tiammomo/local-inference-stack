@@ -98,6 +98,9 @@ curl --noproxy '*' http://127.0.0.1:38082/v1/messages \
 ## 兼容与验收
 
 ```bash
+source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+nvm install
+nvm use
 MODELPORT_PROJECT_DIR=/path/to/ModelPort \
   ./scripts/acceptance-suite.sh standard
 
@@ -107,7 +110,9 @@ python3 scripts/compatibility-check.py \
 ```
 
 Provider、模型映射、思考/采样、Token 限制或 Tool Use 契约变更时，必须协调两个仓库
-并重新运行 `standard`。
+并重新运行 `standard`。该层固定 Linux Node.js 24，还要求 ModelPort runtime、当前调用凭据、
+aggregate snapshots 和 loopback Dashboard 在模型测试前通过 preflight；完整准备步骤见
+[验收与发布](ACCEPTANCE.md#standardfull-联合前置条件)。
 
 ## 聚合运维契约
 

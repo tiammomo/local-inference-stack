@@ -105,6 +105,7 @@ quick_suite() {
 }
 
 standard_suite() {
+  local node_path node_major modelport_endpoint
   if [[ "$QWEN_CATALOG_ID" != "qwen35-9b-q5km" ]]; then
     printf 'standard currently validates the versioned ModelPort contract for qwen35-9b-q5km; selected=%s\n' "$QWEN_CATALOG_ID" >&2
     exit 2
@@ -114,10 +115,32 @@ standard_suite() {
     exit 2
   fi
   if ! command -v node >/dev/null 2>&1; then
-    printf 'standard requires Linux Node.js on PATH for ModelPort checks (Node 24 recommended).\n' >&2
+    printf 'standard requires Linux Node.js 24 on PATH for ModelPort checks.\n' >&2
     printf 'With NVM, run: source "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm use 24\n' >&2
     exit 2
   fi
+  node_path="$(command -v node)"
+  case "$node_path" in
+    /mnt/*|*.exe)
+      printf 'standard requires a Linux Node.js binary; resolved=%s\n' "$node_path" >&2
+      exit 2
+      ;;
+  esac
+  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [[ "$node_major" != "24" ]]; then
+    printf 'standard requires the project-tested Node.js 24 major; resolved=%s (%s).\n' \
+      "$node_path" "$(node --version 2>/dev/null || printf unknown)" >&2
+    printf 'With NVM, run: source "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm install && nvm use\n' >&2
+    exit 2
+  fi
+  modelport_endpoint="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"
+  if ! curl --noproxy '*' --fail --silent --show-error \
+    --connect-timeout 3 --max-time 10 "$modelport_endpoint/livez" >/dev/null; then
+    printf 'standard requires a healthy compatible ModelPort at %s.\n' "$modelport_endpoint" >&2
+    exit 2
+  fi
+  run_step "Operations dashboard preflight" \
+    python3 "$ROOT_DIR/scripts/dashboard-smoke.py"
   quick_suite
   run_step "Cross-repository provider contract" \
     python3 "$ROOT_DIR/scripts/compatibility-check.py" \
@@ -126,9 +149,6 @@ standard_suite() {
   run_step "Exact token counting" "$ROOT_DIR/scripts/modelport-token-count-smoke.sh"
   run_step "ModelPort context admission" \
     "$ROOT_DIR/scripts/modelport-context-admission-smoke.sh"
-  run_step "Operations dashboard" \
-    python3 "$ROOT_DIR/scripts/dashboard-smoke.py"
-  printf '\n'
   run_step "ModelPort reasoning mapping" \
     "$ROOT_DIR/scripts/modelport-reasoning-smoke.sh"
   run_step "ModelPort provider matrix" \

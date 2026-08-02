@@ -2,14 +2,23 @@
 
 ## 日常命令
 
+优先使用只读公共入口：
+
 ```bash
-./stack status
-./stack doctor
+./stack plan --json
+./stack status --json
+./stack doctor --json
+./stack verify --scope config
+./scripts/runtime.sh assert-profile latency
 ./scripts/runtime.sh logs
+```
+
+下列命令会改变 runtime，只在明确批准的维护窗口使用：
+
+```bash
 ./scripts/runtime.sh start latency
 ./scripts/runtime.sh restart
 ./scripts/runtime.sh stop
-./scripts/model-manager.py verify --cached
 ```
 
 `restart` 和 `start` 会先验证活动模型。启动、停止、重启、Profile 切换和候选发布由同一
@@ -19,20 +28,19 @@
 公共 Profile 切换使用 `./stack profile throughput --yes`。若进程或 WSL 在切换/候选发布中断，
 先运行 `./stack reconcile --json` 查看精确恢复动作，经确认后执行 `./stack reconcile --yes`。
 
-可以检查实际容器是否仍与有效配置一致：
-
-```bash
-./scripts/runtime.sh assert-profile latency
-```
-
-健康入口：
+必需的 standalone 健康入口：
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:18080/health
 curl --noproxy '*' http://127.0.0.1:18080/metrics
+nvidia-smi
+```
+
+只有显式启用 ModelPort/operations 后才应存在的可选入口：
+
+```bash
 curl --noproxy '*' http://127.0.0.1:38082/livez
 xdg-open http://127.0.0.1:33004
-nvidia-smi
 ```
 
 所有端口只允许 loopback。本项目的 Python 本地 HTTP 客户端忽略环境代理、拒绝重定向并拒绝
@@ -60,6 +68,50 @@ loginctl enable-linger "$USER"
 loginctl show-user "$USER" -p Linger
 ```
 
+## WSL 重启后的恢复检查
+
+Docker Desktop、WSL systemd user manager 和 GPU 集成不保证同时就绪。已启用的 supervisor
+会等待 Docker，因此日志中短暂出现 `Docker backend unavailable` 不等于部署失败。
+按以下顺序复核：
+
+```bash
+docker version
+docker compose version
+docker info --format '{{json .Runtimes}}'
+nvidia-smi
+systemctl --user status qwen-model-runtime.service
+./stack doctor --json
+./stack status --json
+curl --noproxy '*' http://127.0.0.1:18080/health
+```
+
+判定规则：
+
+- `runtimeHealthy=true` 且 `/health` 为 `ok`：恢复完成，不要再次 deploy；
+- plan 因空闲 VRAM 低而 `readyToDeploy=false`，同时 runtime 健康：现有模型占用 GPU，
+  只是禁止新部署；
+- `reconciliationRequired=false` 但 status 保留终态 `failed` 事务：这是审计历史，
+  不是待恢复事务；
+- supervisor 持续等待且 `docker version` 失败：先恢复 Docker Desktop/WSL 集成，
+  不手工绕过容器准入。
+
+若 Windows 命令或 `docker-credential-desktop.exe` 报 `exec format error`，先在 Windows
+PowerShell 中执行 `wsl --shutdown`，重新打开发行版后验证：
+
+```bash
+test -e /proc/sys/fs/binfmt_misc/WSLInterop
+cmd.exe /c ver
+docker-credential-desktop.exe version
+```
+
+这个流程不需要读取、打印或改写 `~/.docker/config.json`。恢复后运行 quick 会生成
+与当前驱动、容器身份和配置绑定的新凭证：
+
+```bash
+./scripts/acceptance-suite.sh quick
+./stack plan --json
+```
+
 启用 ModelPort 运营、Dashboard、日报、备份与恢复演练：
 
 ```bash
@@ -69,6 +121,10 @@ cp profiles/backup.local.env.example profiles/backup.local.env
 ./scripts/install-user-services.py --operations --enable
 systemctl --user --failed
 ```
+
+ModelPort 管理员密码或 token 旋转后，旧的 `operations.secrets.env` 会出现 401。不要
+手工对比或输出凭据；重新运行 `provision-operations-secrets.py --source ...`，再运行
+`./stack credentials audit --json` 和 operations 验收。
 
 运维凭据默认仍可从 `0600` 兼容文件读取。主机具有 `systemd-creds` 时，可以显式创建加密凭据；
 命令不会删除原文件，确认服务重新安装并正常运行后再由维护者自行退役明文兼容源：
@@ -128,11 +184,13 @@ Prompt RAM Cache 自动工作；稳定 system prompt、工具定义和规则放�
 | CUDA OOM / 空闲显存不足 | 停止其他 GPU 负载，重新运行 `plan --json`；需要改容量时新建并验收 Profile，不临时绕过门禁 |
 | Runtime 不健康 | 运行 `status`、`logs`、`verify --cached`；确认后再用受控 `restart` |
 | ModelPort 找不到 `qwen-runtime` | 检查 `modelport_default` 网络、容器健康和 DNS alias |
+| Operations Collector 登录返回 401 | ModelPort 凭据已旋转；用支持的 provision 流程重建本地私有凭据 |
+| Docker credential helper `exec format error` | 检查 `WSLInterop`；优先完整 `wsl --shutdown` 后复核，不改写敏感 Docker 配置 |
 | 只有 reasoning、没有正文 | 用精确 Token 计数检查输入，增加合理 `max_tokens` 或降低思考预算 |
 | 磁盘/备份/systemd 告警 | 运行带 `--fail-on-alert` 的报告，验证最新备份并检查 user journal |
 
-恢复顺序：先用 `runtime.sh start latency` 恢复并确认 `18080/health`，再恢复 ModelPort，
-最后运行 `acceptance-suite.sh standard`。不要用裸 Compose 命令绕过完整性和 Profile
-检查。
+恢复顺序：先等待已启用的 runtime supervisor；若它未安装，经批准后用
+`runtime.sh start latency` 恢复并确认 `18080/health`。然后恢复 ModelPort，最后运行
+`acceptance-suite.sh standard`。不要用裸 Compose 命令绕过完整性和 Profile 检查。
 
 更完整的概念、学习实验和排障路径见[学习与实践指南](LEARNING_GUIDE.md)。

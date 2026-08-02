@@ -29,6 +29,17 @@ else
   printf 'NOTE: shellcheck is not installed; shell lint skipped.\n'
 fi
 if command -v node >/dev/null 2>&1; then
+  expected_node_major="$(tr -d '[:space:]' < .nvmrc)"
+  actual_node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [[ "$actual_node_major" != "$expected_node_major" ]]; then
+    if [[ "${REQUIRE_NODE:-false}" == "true" ]]; then
+      printf 'Node.js major %s is required by .nvmrc; found %s.\n' \
+        "$expected_node_major" "$(node --version 2>/dev/null || printf unknown)" >&2
+      exit 1
+    fi
+    printf 'NOTE: .nvmrc requires Node.js %s; using %s only for the optional syntax check.\n' \
+      "$expected_node_major" "$(node --version 2>/dev/null || printf unknown)"
+  fi
   node --check dashboard/app.js
 elif [[ "${REQUIRE_NODE:-false}" == "true" ]]; then
   printf 'node is required but not installed.\n' >&2
@@ -37,6 +48,7 @@ else
   printf 'NOTE: node is not installed; dashboard syntax check skipped.\n'
 fi
 python3 scripts/check-doc-links.py
+python3 scripts/check-doc-commands.py
 ./stack config check --json >/dev/null
 ./stack reference --check --json >/dev/null
 python3 scripts/install-user-services.py --check

@@ -20,6 +20,10 @@
 16GB 时，该配置仍是本机候选项，只有完成 `acceptance-suite.sh quick` 后才能视为
 在该主机可用。已记录的实机验证仍是 RTX 5070 Ti 16GB 档位。
 
+验证档案中的 `96GB host RAM` 表示参考机器的物理内存配置，不是 WSL 每次都可见的动态值；
+Catalog 可复用硬件档位的 RAM 下限是 64GiB，而 planner 使用当前发行版实际可见/可用内存做准入。
+因此 WSL 的内存上限、Windows 占用或重启会改变 plan 读数，不能用物理内存标签替代当前探测。
+
 ## 非自动化场景
 
 - 多 GPU：不聚合显存，必须人工设计 tensor split 和独立 Profile。

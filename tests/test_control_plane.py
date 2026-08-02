@@ -18,7 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from local_inference_stack import attestation, bundle, cli, configuration, storage
+from local_inference_stack import attestation, bundle, cli, configuration, reference, storage
 from local_inference_stack.paths import ProjectPaths
 from local_inference_stack.result import CommandResult, IntegrityError, RecoveryError
 from local_inference_stack.runner import RunResult
@@ -37,6 +37,26 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class CommandContractTests(unittest.TestCase):
+    def test_generated_reference_covers_the_argparse_command_tree(self) -> None:
+        def leaves(parser: object, prefix: tuple[str, ...] = ()) -> set[str]:
+            children = None
+            for action in parser._actions:
+                if action.__class__.__name__ == "_SubParsersAction":
+                    children = action.choices
+                    break
+            if children is None:
+                return {" ".join(prefix)}
+            result: set[str] = set()
+            for name, child in children.items():
+                result.update(leaves(child, (*prefix, name)))
+            return result
+
+        self.assertEqual(leaves(cli.parser()), set(reference.command_paths()))
+        self.assertEqual(
+            set(reference.COMMANDS),
+            {path.split()[0] for path in reference.command_paths()},
+        )
+
     def test_command_result_has_stable_top_level_shape(self) -> None:
         result = CommandResult("doctor", "ok", "healthy").as_dict()
         self.assertEqual(

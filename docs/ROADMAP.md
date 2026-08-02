@@ -3,9 +3,22 @@
 本路线图落实 [ADR-0001](decisions/0001-trusted-single-host-appliance.md)。它描述依赖顺序和完成定义，
 不是承诺日期。任何阶段都必须保持现有安全黄金路径可用。
 
-截至 2026-07-31，本仓库侧 Phase 0–4、6–7 已形成首个可用实现；Phase 5 已完成零凭据
+截至 2026-08-02，本仓库侧 Phase 0–4、6–7 已形成首个可用实现；Phase 5 已完成零凭据
 Dashboard、短生命周期 Collector 和版本化快照契约。本仓库无法单方面创建 ModelPort 的最小权限
 operations scope，该项必须在 ModelPort 仓库联合实现后才能宣告端到端完成。
+
+| Phase | 当前状态 | 说明 |
+| --- | --- | --- |
+| 0 基线与决策 | 首版完成 | ADR、行为边界、支持矩阵和 characterization tests 已落地 |
+| 1 统一 CLI | 首版完成 | `./stack`、结构化结果、退出码和兼容适配已落地 |
+| 2 类型化配置 | 首版完成 | schema、确定性渲染和 drift check 已落地 |
+| 3 持久事务 | 首版完成 | 运行变更状态机、恢复计划和故障边界测试已落地 |
+| 4 证据晋级 | 首版完成，持续强化 | 本机 schema v4 与 attestation 接口已落地；撤销/supersede 仍需完善 |
+| 5 最小权限运维 | 部分完成，跨仓库阻塞 | aggregate-only 快照和零凭据 Dashboard 已完成；专用 scope 待 ModelPort |
+| 6 供应链与 bundle | 首版完成，持续强化 | 固定身份、来源审计和离线 bundle 已落地；签名覆盖继续扩展 |
+| 7 校准/存储/凭据 | 首版完成，持续强化 | report-only 校准、安全 GC、凭据审计/迁移和生成参考已落地 |
+
+“首版完成”表示仓库已有可测试实现，不代表后续安全、兼容和跨主机证据工作结束。
 
 ## 执行规则
 
@@ -206,11 +219,12 @@ planned
 - 旧脚本至少保留一个明确版本周期的弃用提示；
 - Linux 与 WSL2 分别收集验收和恢复证据；
 - 每个 Phase 完成后更新 ADR 状态、路线图和 deployment manifest；
-- 在 Phase 0–4 完成前，不扩展新硬件 backend、在线自适应或 Dashboard 写操作。
+- 新硬件 backend、在线自适应或 Dashboard 写操作仍需独立 ADR、威胁建模和验收，不能因
+  Phase 0–4 已有首版实现而自动扩大可信边界。
 
-## 推荐的首个实施切片
+## 首个实施切片（已完成）
 
-第一个代码切片应严格限制为：
+已交付的第一个代码切片为：
 
 1. 建立 Python package 和 `./stack`；
 2. 实现只读 `stack plan --json`；
@@ -218,4 +232,9 @@ planned
 4. 用 characterization tests 证明它与现有 `model-manager.py plan --json` 等价；
 5. 不改下载、选择、运行或验收路径。
 
-这个切片风险最低，也为后续配置和事务工作提供稳定边界。
+当前后续优先级不是重新实现该切片，而是：
+
+1. 与 ModelPort 联合完成专用 operations scope，去掉 Collector 对管理员凭据的过渡依赖；
+2. 为 Linux 与 WSL2 恢复分别积累可复核证据，包括 Docker 晚就绪和 WSL Interop 故障；
+3. 完成可复用 attestation 的签名、撤销和 supersede 流程；
+4. 在不放宽单机可信边界的前提下，持续收敛旧脚本与公共 `./stack` 命令的重叠。

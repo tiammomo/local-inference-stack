@@ -4,7 +4,7 @@
 
 | 项目 | 基线 |
 | --- | --- |
-| GPU / RAM | RTX 5070 Ti 16GB / 96GB |
+| GPU / RAM | RTX 5070 Ti 16GB / 96GB 物理参考配置；Catalog 复用下限 64GiB |
 | 模型 | Qwen3.5-9B GGUF Q5_K_M |
 | 运行时 | 固定 digest 的 llama.cpp CUDA |
 | 上下文 | 128K，单 Slot |
@@ -15,6 +15,9 @@
 已验证直连生成、思考、118K 召回、92K ModelPort 链路、Tool Use、质量、备份恢复、
 串行候选和部署漂移检查。典型短解码约 88–90 tok/s，峰值显存低于 12.4GiB；
 这些数据是本机基线，不是其他硬件的承诺。
+
+`96GB` 记录参考宿主机的物理配置；WSL 发行版在运行时可见的总量和可用量可能更低且会变化。
+部署准入始终使用当前 `plan.host.ramGiB`/`availableRamGiB`，不能仅凭表中的物理标签放行。
 
 未采用：q4 KV 会显著拖慢长提示预填充；MTP 在长上下文回退；`batch=4096` 无收益；
 双 Slot 只作为牺牲单请求速度和上下文的 `throughput` Profile。
@@ -27,6 +30,21 @@ python3 ./scripts/verify-deployment.py
 
 新主机、驱动、镜像、模型或配置变化后必须重新验收；不能复制本机凭证来继承
 `validated-on-this-host`。
+
+## WSL 恢复复核（2026-08-02）
+
+- systemd user manager 比 Docker Desktop 先就绪，runtime supervisor 按设计等待一轮后
+  自动恢复 `latency` Profile，无需重新 deploy；
+- supervisor 仍由 uv-managed CPython 3.14.6 运行，linger 已启用，user failed-unit 列表为空；
+- quick 重新通过 68 个单测、缓存权重校验、canonical 运行身份、直连生成和 reasoning；
+- Node 24 下的 standard 通过 Dashboard preflight、双仓库兼容、Token、reasoning、Tool Use
+  与质量冒烟；operations Dashboard 仅为验收临时启动，完成后仍保持 disabled/inactive；
+- 后续 plan 返回 `validated-on-this-host` 和 `passed-current-configuration`。模型载入后
+  最新复核空闲显存约 4.0 GiB，因此 `readyToDeploy=false` 只阻止第二次部署，不表示现有服务失败；
+- `WSLInterop`、`cmd.exe` 和 Docker credential helper 在完整 WSL 重启后恢复可用。
+
+该复核只证明当时的恢复路径。可继承的部署身份仍以 manifest 为准，本机验收 JSON
+仍保持 Git 忽略、`0600` 和有效期限制。
 
 ## 供应链与许可证审查（2026-08-01）
 
