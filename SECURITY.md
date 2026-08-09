@@ -16,3 +16,12 @@ The default supported boundary is a trusted single-user Linux/WSL NVIDIA host
 with loopback-only services. LAN/public exposure, multi-tenant isolation,
 business tool execution, and arbitrary third-party ModelPort providers require
 their own security review.
+
+The host port is loopback-only, but the llama.cpp API inside the reviewed
+`modelport` Docker network has no independent API authentication. Any container
+joined to that network is therefore inside the trust boundary. The runtime
+template does not join Compose's default bridge, and exact network membership is
+part of acceptance, but `--offline` is a model behavior flag—not an egress
+firewall. Multi-container isolation, an internal-only network, or runtime API
+credentials must be designed together with ModelPort before adding untrusted
+network peers.

@@ -1,22 +1,35 @@
 # 项目优化路线图
 
-本路线图落实 [ADR-0001](decisions/0001-trusted-single-host-appliance.md)。它描述依赖顺序和完成定义，
-不是承诺日期。任何阶段都必须保持现有安全黄金路径可用。
+本路线图落实 [ADR-0001](decisions/0001-trusted-single-host-appliance.md) 和
+[ADR-0002](decisions/0002-long-term-appliance-simplification.md)。发生冲突时，以更窄、更新的
+ADR-0002 为准。它描述依赖顺序和完成定义，不是承诺日期；任何阶段都必须保持现有安全黄金
+路径可用。
 
-截至 2026-08-02，本仓库侧 Phase 0–4、6–7 已形成首个可用实现；Phase 5 已完成零凭据
-Dashboard、短生命周期 Collector 和版本化快照契约。本仓库无法单方面创建 ModelPort 的最小权限
-operations scope，该项必须在 ModelPort 仓库联合实现后才能宣告端到端完成。
+截至 2026-08-09，控制面完成了一轮 fail-closed 加固，但当前 9B 档案已降为
+`provisional-legacy`：在线健康实例不等于新部署资格。本轮只修改仓库，没有启停运行时、执行
+qualification、写本机 evidence 或处理持久事务。长期收口的第一阶段只建立 package-native
+权威边界并删除无消费者 wrapper；维护窗口切换和现场重新 qualification 仍未开始。
+
+## ADR-0002 收口阶段
+
+| 阶段 | 当前状态 | 完成定义 |
+| --- | --- | --- |
+| A 旁路重构 | 进行中 | Catalog、material、observation 和 lifecycle 逻辑进入 package；当前 runtime 不变 |
+| B 维护窗口切换 | 代码准备中，现场未开始 | Compose 已固定关闭 Docker 自动重启；仍须处理 v1 事务、受控 recreate、切换中性配置并完成 host qualification |
+| C 验证后删除 | 未开始 | LTS/回滚/重启验证通过后，删除旧 schema、candidate、operations、bundle 与 attestation 核心路径 |
+
+下面 Phase 0–7 记录前一轮加固的实现来源和仍需迁移的依赖，不再表示所有能力都会长期留在核心。
 
 | Phase | 当前状态 | 说明 |
 | --- | --- | --- |
 | 0 基线与决策 | 首版完成 | ADR、行为边界、支持矩阵和 characterization tests 已落地 |
 | 1 统一 CLI | 首版完成 | `./stack`、结构化结果、退出码和兼容适配已落地 |
-| 2 类型化配置 | 首版完成 | schema、确定性渲染和 drift check 已落地 |
-| 3 持久事务 | 首版完成 | 运行变更状态机、恢复计划和故障边界测试已落地 |
-| 4 证据晋级 | 首版完成，持续强化 | 本机 schema v4 与 attestation 接口已落地；撤销/supersede 仍需完善 |
+| 2 类型化配置 | 加固完成，待实机复核 | Catalog 决定模型容量，Profile 只覆盖运行模式；schema v2 与矩阵测试已落地 |
+| 3 持久事务 | v2 已实现，待现场迁移 | recovery-required、事务 ID CAS、双锁、信号恢复和 supervisor maintenance wait 已落地；旧 v1 只读 |
+| 4 证据晋级 | 门禁实现，尚无可晋级证据 | schema v4 绑定当前制品/完整安全信封；full、性能、受信签名和生命周期必须同时通过 |
 | 5 最小权限运维 | 部分完成，跨仓库阻塞 | aggregate-only 快照和零凭据 Dashboard 已完成；专用 scope 待 ModelPort |
 | 6 供应链与 bundle | 首版完成，持续强化 | 固定身份、来源审计和离线 bundle 已落地；签名覆盖继续扩展 |
-| 7 校准/存储/凭据 | 首版完成，持续强化 | report-only 校准、安全 GC、凭据审计/迁移和生成参考已落地 |
+| 7 校准/存储/凭据 | 部分完成 | baseline-only 校准、安全 GC、凭据审计/迁移已落地；性能阈值仍为 pending-baseline |
 
 “首版完成”表示仓库已有可测试实现，不代表后续安全、兼容和跨主机证据工作结束。
 
@@ -234,7 +247,13 @@ planned
 
 当前后续优先级不是重新实现该切片，而是：
 
-1. 与 ModelPort 联合完成专用 operations scope，去掉 Collector 对管理员凭据的过渡依赖；
-2. 为 Linux 与 WSL2 恢复分别积累可复核证据，包括 Docker 晚就绪和 WSL Interop 故障；
-3. 完成可复用 attestation 的签名、撤销和 supersede 流程；
-4. 在不放宽单机可信边界的前提下，持续收敛旧脚本与公共 `./stack` 命令的重叠。
+1. 在明确批准的维护窗口完成至少三轮 `baseline-only` 校准，评审后写入硬阈值；
+2. 在干净提交上运行 schema v4 `full`，复核逐步结果、制品和完整容器安全信封，再用固定的
+   受信公钥策略签名；
+3. 显式审阅并处理本机 legacy transaction；在此之前 supervisor 只等待，不自动覆盖健康实例；
+4. 与 ModelPort 约定 provider self-attestation/health contract，并把 operations、数据库、
+   Dashboard、备份和管理员凭据代码迁出核心；
+5. 解除 Catalog admission 对 reusable attestation/offline bundle 的依赖，再把两者迁为可选
+   发布工具或删除；核心只保留签名 Git release、固定 artifact identity 和本机 qualification；
+6. 只为 Tier-1 WSL2/RTX 5070 Ti 积累重启与失败恢复证据；native Linux 在有真实主机证据前
+   保持 Tier-2 只读诊断。

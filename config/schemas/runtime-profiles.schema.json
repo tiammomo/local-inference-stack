@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local-inference-stack.invalid/schemas/runtime-profiles-v1.json",
+  "$id": "https://local-inference-stack.invalid/schemas/runtime-profiles-v2.json",
   "title": "Local Inference Stack runtime profiles",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "profiles"],
   "properties": {
-    "schemaVersion": {"const": 1},
+    "schemaVersion": {"const": 2},
     "profiles": {
       "type": "object",
       "minProperties": 1,

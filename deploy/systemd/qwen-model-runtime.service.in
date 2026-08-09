@@ -1,5 +1,5 @@
 [Unit]
-Description=Supervise the selected local inference runtime after login or boot
+Description=Sole restart and recovery supervisor for the selected local inference runtime
 After=network-online.target
 Wants=network-online.target
 OnFailure=qwen-model-production-alert@%n.service
@@ -25,7 +25,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@PROJECT_ROOT@/cache @PROJECT_ROOT@/logs/alerts
+ReadWritePaths=@PROJECT_ROOT@/cache @PROJECT_ROOT@/logs/alerts @PROJECT_ROOT@/profiles
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

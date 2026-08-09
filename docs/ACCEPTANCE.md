@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `quick` | 单测、活动权重、运行态、直连生成与思考 | 首次部署、WSL/Docker 恢复、普通本仓变更 |
 | `standard` | quick + ModelPort 契约、Token、Dashboard、Tool Use、质量冒烟 | 协议、推理或 Tool 变更 |
-| `full` | standard + 完整哈希、长上下文、性能、完整质量集 | 模型、量化、KV、上下文、镜像升级 |
+| `full` | standard + 完整哈希、长上下文、性能门禁、完整质量集 | 模型、量化、KV、上下文、镜像升级与 Catalog 晋级 |
 
 ```bash
 ./scripts/acceptance-suite.sh quick
@@ -66,6 +66,12 @@ provision，不能把密码或 token 粘贴进命令、日志或文档。
 - 验收 Profile 为 `latency`，模式对应的测试依赖没有漂移；
 - 本地选择 Profile、有效 Compose 哈希和实际容器配置哈希全部匹配；
 - 实际容器仍在运行且健康，镜像 ID、用户、命令、安全项、日志、端口和关键挂载没有漂移。
+- 当前模型文件的设备号、inode、大小、mtime、ctime 与私有 integrity stamp 完全匹配；任一变化
+  都会失效并要求重新计算完整 SHA256，而只读 plan 不会偷偷重哈希大文件。
+- 实际容器的 privileged、capability、网络/alias、全部挂载、GPU device request、tmpfs、PID、
+  init、restart 和日志边界与 canonical Compose 完全匹配；完整信封还精确绑定镜像 ID、Entrypoint、
+  WorkingDir、healthcheck、环境变量键集合与隐私哈希、PID/IPC/UTS/user/cgroup namespace、raw
+  devices、bind mode/propagation、DNS/extra-host/sysctl，结果只输出漂移字段而不输出环境值。
 
 复制到其他主机、配置漂移、过期或权限放宽都会使凭证失效。硬件档位匹配不能替代它。
 
@@ -85,26 +91,69 @@ quick 通过后重新运行：
 - `hostAcceptanceEvidence` 指向当前安全的 schema v4 文件。
 
 这不保证 `readyToDeploy=true`。健康容器已占用 GPU 时，空闲显存会使
-`readyToDeploy=false` 且 `nextCommands=[]`，目的是阻止第二次部署。现有服务是否已恢复
+`readyToDeploy=false` 且 `actionPlan=null`，目的是阻止第二次部署。现有服务是否已恢复
 应以 `status.facts.runtimeHealthy`、`/health` 和 canonical Profile 检查为准。
 
 若 quick 失败，失败证据只用于诊断，不会升级本机状态。不要手工编辑 JSON、
 放宽权限或复制旧证据来获得 `validated-on-this-host`。
+
+## Catalog 晋级与性能证据
+
+本机 acceptance 与可复用 Catalog attestation 是两层证据。`validated` 晋级只接受当前、完整的
+schema v4 `full` evidence，并要求 clean Git revision、当前制品/runtime/配置匹配、受信任的分离
+签名、有效期、撤销状态和 supersede 链。自哈希、README 或 manifest 不能单独完成晋级。
+稳定 validation input 还绑定全部控制面 package、公共 launcher、类型化配置 schema 和性能策略；
+任何安全/晋级逻辑或硬阈值变化都会使旧签名失去晋级资格。Catalog 运行时只接受由
+`LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY` 与
+`LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY_SHA256` 提供的外部固定信任根。
+签名前会从保留的 `0600` evidence 重新构造 canonical subject，逐项绑定 model、validation input、
+artifact、runtime 和完整 runner 记录；不能把 A 模型证据换成 B 模型声明。验签时公钥和 signature
+必须是当前用户拥有、单硬链接、不可被 group/other 写入的普通小文件；哈希和外部验签只使用同一
+份 `0600` 快照，避免路径在两步之间被替换。
+
+性能策略来自 deployment manifest。长上下文正确性、无 OOM、峰值显存、稳定解码吞吐和聚合
+吞吐属于硬门禁；TTFT、预填充和其他高噪声指标先记录分布并告警。没有至少三轮校准数据时，
+策略保持 `pending-baseline`：可以收集 baseline，但生成的 full evidence 不具备晋级资格。
+
+校准会发送合成模型请求，必须单独批准；它同时采集 decode、aggregate throughput 与峰值显存，
+只写 `0600` 私有报告，不改生产 Profile，也不会产生 host acceptance：
+
+```bash
+./stack calibrate plan --json
+./stack calibrate run --output logs/calibration/run-1.json --yes
+```
+
+至少重复三轮并评审分布后，才能在 manifest 中把策略改为 `enforced`。普通 `full` 在
+`pending-baseline` 时会在任何模型请求前退出；`full --baseline-only` 强制 `--no-record`，即使所有
+测试通过也不能签署或晋级。
+
+当前可执行 Catalog 只保留 legacy/provisional 9B 档案，并暂时禁止新部署。未经实机验证的估算
+模型不再进入部署 allowlist。
 
 ## 发布前检查
 
 ```bash
 ./scripts/release-check.sh
 ./scripts/model-manager.py audit-sources --json
-python3 ./scripts/verify-deployment.py
+./stack verify --scope all --json
 
 python3 ./scripts/compatibility-check.py \
   --modelport-project "$MODELPORT_PROJECT_DIR" --release
 ```
 
-`release-check` 包含全部 JSON/Python/Shell/前端语法、单测、Markdown 链接、三个 Compose
+`standalone` 会验证完整容器身份与当前制品，`integrated`/`all` 会先通过同一
+standalone/transaction 基线，再精确检查 ModelPort、
+PostgreSQL、Dashboard 的权限、全部端口/挂载/网络安全信封，以及 operations、备份和历史部署
+身份。`release-check` 包含全部 JSON/Python/Shell/前端语法、单测、Markdown 链接、三个 Compose
 Profile、部署 manifest 文件哈希、Git 禁入项和 Gitleaks。来源审计会联网
 核对固定 revision/LFS 身份，但仍不能替代许可证和发布者信任审查。
+
+当前历史 manifest 没有足够信息重建三个 ModelPort 容器的完整 executable identity，因而显式标为
+`review-required`，不能从当前 dirty live container 反向填充成“已评审”。这是联合验收的预期阻断项，
+不是通过放宽 verifier 消除的告警。
+未来的 `reviewed-current` identity 必须绑定 Compose 与非秘密 `config.toml` 内容哈希；私有 `.env`
+不把秘密摘要写入 Git，而是在安全读取后把源值与 live container environment 在内存逐键比较，
+诊断只输出字段名。缺失 bindings/files 字段本身就是失败，不能用省略字段跳过验证。
 
 质量或 Tool Use 定位时使用；这些命令要求已配置可用的 ModelPort：
 

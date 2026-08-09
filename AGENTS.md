@@ -8,8 +8,8 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 
 1. Read `README.md`, `docs/GETTING_STARTED.md`, `docs/HARDWARE_GUIDE.md`, and
    `catalog/models.json` before changing host state.
-2. Run `./stack plan --json` (the compatibility implementation delegates to
-   `./scripts/model-manager.py plan --json`). This is the only default first-run
+2. Run `./stack plan --json`. The current implementation may use internal
+   compatibility adapters, but those are not public entry points. This is the only default first-run
    command: it is read-only and reports detected hardware,
    prerequisites, recommendation status, size, and next commands.
 3. Show the user the selected model, `evidenceStatus`, `hostAcceptanceStatus`,
@@ -19,8 +19,10 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 4. After approval, prefer `./stack deploy --model CATALOG_ID --yes`; use only
    catalog-backed commands with `--yes`; never invent a
    filename, URL, hash, hardware threshold, or unreviewed model entry.
-5. Run `./scripts/acceptance-suite.sh quick` after deployment. A recommendation
-   marked `estimated` remains a candidate until it passes acceptance on that host.
+5. A successful `./stack deploy` already includes quick acceptance; do not run
+   it a second time. Use the documented internal quick command only for a
+   standalone recheck or a contributor verification task. A provisional or
+   estimated recommendation is not promoted by quick acceptance alone.
 6. Record genuinely reusable host validation as a deployment manifest under
    `deployments/`; do not relabel estimates as validated.
 7. Treat `validated-on-this-host` as valid only when `hostAcceptanceEvidence`
@@ -36,10 +38,11 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
   and are promoted only after exact byte-size and SHA256 verification.
 - The catalog pins third-party GGUF artifacts; review the upstream model and
   artifact licenses before use. A hash proves identity, not trustworthiness.
-- Automation currently supports Linux/WSL x86_64 NVIDIA CUDA hosts. For CPU,
-  Apple Silicon, AMD, unusual multi-GPU, or shared production GPUs, stop after
+- Automatic new deployment currently requires the exact Tier-1 WSL2 x86_64 /
+  RTX 5070 Ti profile. Native Linux and other NVIDIA hosts remain read-only
+  until qualified. For CPU, Apple Silicon, AMD, unusual multi-GPU, or shared production GPUs, stop after
   the plan and design a reviewed profile rather than forcing this Compose stack.
-- `readyToDeploy=false` or an empty `nextCommands` list is a hard stop. Do not
+- `readyToDeploy=false` or a missing typed `actionPlan` is a hard stop. Do not
   work around free-VRAM, multi-GPU, platform, or prerequisite admission checks.
 - Keep services loopback-bound. Do not expose port `18080` or the operations
   dashboard without adding authentication and a separate security review.

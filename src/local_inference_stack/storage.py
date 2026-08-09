@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .catalog import CatalogError, load_catalog
 from .paths import ProjectPaths
 from .result import ConfigError
 from .transactions import TERMINAL_STATES
@@ -56,12 +57,12 @@ def gc_candidates(paths: ProjectPaths, *, older_than_days: int = 14) -> list[dic
     directory_locks: dict[str, Path] = {}
     if catalog_path.is_file():
         try:
-            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            catalog = load_catalog(catalog_path)
             directory_locks = {
                 model["modelDirectory"]: paths.root / "cache" / "locks" / f"download-{model['id']}.lock"
-                for model in catalog.get("models", [])
+                for model in catalog["models"]
             }
-        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        except CatalogError:
             return []
     # Only interrupted download fragments and known temporary files are eligible.
     patterns = ((paths.root / "models", "*.part"), (paths.root / "cache", "*.tmp"))

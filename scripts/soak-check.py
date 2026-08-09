@@ -8,8 +8,8 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 ROOT_DIR = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT_DIR / "logs" / "operations"
 BACKUP_DIR = ROOT_DIR / "backups" / "modelport"
+BACKUP_FUTURE_SKEW_SECONDS = 300
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,22 +114,35 @@ def report_evidence(minimum_hours: float) -> dict[str, Any]:
 
 def latest_backup_age_hours() -> tuple[float | None, bool]:
     try:
-        archives = [
-            path
-            for path in BACKUP_DIR.glob("modelport-*.tar.gz")
-            if path.is_file() and not path.is_symlink()
-        ]
+        directory_metadata = BACKUP_DIR.lstat()
+        archives: list[tuple[Path, os.stat_result]] = []
+        for path in BACKUP_DIR.glob("modelport-*.tar.gz"):
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode):
+                archives.append((path, metadata))
         if not archives:
             return None, False
-        latest = max(archives, key=lambda path: path.stat().st_mtime_ns)
-        age = max(0.0, datetime.now(timezone.utc).timestamp() - latest.stat().st_mtime)
+        _latest, metadata = max(archives, key=lambda item: item[1].st_mtime_ns)
+        age = datetime.now(timezone.utc).timestamp() - metadata.st_mtime
         secure = (
-            BACKUP_DIR.stat().st_mode & 0o077 == 0
-            and latest.stat().st_mode & 0o077 == 0
+            stat.S_ISDIR(directory_metadata.st_mode)
+            and directory_metadata.st_uid == os.getuid()
+            and directory_metadata.st_mode & 0o077 == 0
+            and metadata.st_uid == os.getuid()
+            and metadata.st_nlink == 1
+            and metadata.st_mode & 0o077 == 0
         )
-        return round(age / 3600, 3), secure
+        return round(age / 3600, 6), secure
     except OSError:
         return None, False
+
+
+def backup_age_is_acceptable(age_hours: float | None, maximum_hours: float) -> bool:
+    return bool(
+        age_hours is not None
+        and age_hours >= -(BACKUP_FUTURE_SKEW_SECONDS / 3600)
+        and age_hours <= maximum_hours
+    )
 
 
 def endpoint_ok(url: str) -> bool:
@@ -137,6 +151,35 @@ def endpoint_ok(url: str) -> bool:
             return 200 <= response.status < 300
     except OSError:
         return False
+
+
+def deployment_verification_result(
+    completed: subprocess.CompletedProcess[str],
+) -> tuple[bool, Any]:
+    """Interpret the stable public CommandResult returned by ``stack verify``."""
+    try:
+        document = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return False, completed.stderr.strip() or "invalid output"
+    if (
+        not isinstance(document, dict)
+        or document.get("schemaVersion") != 1
+        or document.get("command") != "verify"
+        or not isinstance(document.get("code"), int)
+    ):
+        return False, "invalid CommandResult"
+    code = document["code"]
+    passed = bool(
+        completed.returncode == code == 0 and document.get("status") == "ok"
+    )
+    summary = {
+        "status": document.get("status"),
+        "code": code,
+        "summary": document.get("summary"),
+    }
+    if completed.returncode != code:
+        summary["processCode"] = completed.returncode
+    return passed, summary
 
 
 def evaluate(minimum_hours: float) -> dict[str, Any]:
@@ -213,25 +256,30 @@ def evaluate(minimum_hours: float) -> dict[str, Any]:
     )
 
     backup_age, secure = latest_backup_age_hours()
-    add_check(checks, "latest backup age", backup_age is not None and backup_age <= 36, backup_age, "<=36h")
+    add_check(
+        checks,
+        "latest backup age",
+        backup_age_is_acceptable(backup_age, 36),
+        backup_age,
+        f">=-{BACKUP_FUTURE_SKEW_SECONDS}s and <=36h",
+    )
     add_check(checks, "backup permissions", secure, secure, True)
 
     deployment = subprocess.run(
-        [sys.executable, str(ROOT_DIR / "scripts" / "verify-deployment.py"), "--json"],
+        [str(ROOT_DIR / "stack"), "verify", "--scope", "all", "--json"],
+        cwd=ROOT_DIR,
         capture_output=True,
         text=True,
         timeout=180,
     )
-    deployment_passed = False
-    deployment_summary: Any = deployment.stderr.strip() or "invalid output"
-    if deployment.returncode == 0:
-        try:
-            deployment_document = json.loads(deployment.stdout)
-            deployment_summary = deployment_document.get("summary")
-            deployment_passed = deployment_document.get("status") == "passed"
-        except ValueError:
-            pass
-    add_check(checks, "deployment manifest", deployment_passed, deployment_summary, {"failed": 0})
+    deployment_passed, deployment_summary = deployment_verification_result(deployment)
+    add_check(
+        checks,
+        "deployment manifest",
+        deployment_passed,
+        deployment_summary,
+        "public verification status=ok/code=0",
+    )
 
     failed = sum(not check["passed"] for check in checks)
     return {

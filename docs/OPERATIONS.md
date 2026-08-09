@@ -7,13 +7,16 @@
 ```bash
 ./stack plan --json
 ./stack status --json
+./stack status --scope integrated --json
 ./stack doctor --json
 ./stack verify --scope config
+./stack verify --scope standalone
 ./scripts/runtime.sh assert-profile latency
 ./scripts/runtime.sh logs
 ```
 
-下列命令会改变 runtime，只在明确批准的维护窗口使用：
+下列兼容适配命令会改变 runtime，只在明确批准的维护窗口和现有事务保护下使用；不要用
+`docker compose up/restart` 代替它们：
 
 ```bash
 ./scripts/runtime.sh start latency
@@ -25,8 +28,15 @@
 `flock` 与持久事务串行化；启动只有在健康探针通过后才返回成功。默认 `latency` 是单 Slot；只有两个短上下文
 任务并发时才显式切换 `./stack profile throughput --yes`，完成后恢复 `latency`。
 
-公共 Profile 切换使用 `./stack profile throughput --yes`。若进程或 WSL 在切换/候选发布中断，
+公共 Profile 切换使用 `./stack profile throughput --yes`。当前 Catalog 冻结新部署期间，已有
+选择仍可在主机准入通过后恢复，但不能借恢复入口下载、选择或部署新模型。若进程或 WSL 在切换/候选发布中断，
 先运行 `./stack reconcile --json` 查看精确恢复动作，经确认后执行 `./stack reconcile --yes`。
+
+失败事务进入 `recovery_required` 并阻止后续变更。旧 schema v1 `failed` 记录不再被猜测为已恢复：
+只读 reconcile 会先分类当前 runtime；只有显式批准后，才能在不触碰健康 canonical runtime 的
+前提下标记 `superseded-verified`，或在恢复并验证原身份后标记 `failed-restored`。
+处于 `planned/deploying/accepting` 的 v2 事务可能仍有发起进程存活，即使传入 `--yes` 也只会拒绝
+并等待；只有明确的 `recovery_required` 才进入 v2 恢复路径。每次状态转换都必须匹配原事务 ID。
 
 必需的 standalone 健康入口：
 
@@ -59,7 +69,17 @@ runtime-only 模式只保留 `qwen-model-runtime.service` 和本地告警模板�
 日志与备份数据不会删除。supervisor 不负责启动 WSL 或 Docker Desktop：Docker 后端不可用时
 每 60 秒重试，持续 10 分钟后记录 `0600` 本地告警但继续等待。成功后每 5 分钟校验
 `/health`、固定 `latency` Profile 和实际容器身份；unhealthy 时只执行一次受控恢复。
+Compose 将 runtime 的 `restart` 固定为 `no`，不接受 Profile 或环境变量覆盖；因此 Docker
+Engine 只执行容器动作，不承担自动恢复。systemd user supervisor 是长期运行路径中唯一的
+重启、等待和恢复 owner，standalone 模式不要求 ModelPort 服务已经运行。
 Docker 临时不可用可以继续等待；显存准入、哈希、权限或配置漂移失败会停止并要求人工处理。
+活动 transaction、维护 lease 或 runtime lock 冲突只会使 supervisor 等待；它不得在 deploy、
+Profile 切换或候选发布期间擅自启动新选择，也不得把正常维护锁竞争当成永久故障。
+
+已有容器不会因仓库模板改变而自动取得新 restart policy。维护窗口必须先处理所有待恢复事务，
+然后通过受事务保护的 `./stack profile latency --yes` 受控 recreate；最后安装/重启 runtime-only
+unit，并确认实际容器的 restart policy 为 `no`、supervisor 为 active。该切换会造成短暂停机，
+不得在未批准窗口直接执行，也不得仅用 `docker update` 伪造完成状态。
 
 若要求 WSL 启动后无需交互登录即可运行 user manager，需要由主机维护者显式启用 linger：
 
@@ -87,11 +107,12 @@ curl --noproxy '*' http://127.0.0.1:18080/health
 
 判定规则：
 
-- `runtimeHealthy=true` 且 `/health` 为 `ok`：恢复完成，不要再次 deploy；
+- `runtimeHealthy=true` 且 `/health` 为 `ok`：服务数据面可用，不要再次 deploy；若同时
+  `controlPlaneReady=false`，命令会以 attention/恢复退出码返回，表示仍不能安全执行下一次变更；
 - plan 因空闲 VRAM 低而 `readyToDeploy=false`，同时 runtime 健康：现有模型占用 GPU，
   只是禁止新部署；
-- `reconciliationRequired=false` 但 status 保留终态 `failed` 事务：这是审计历史，
-  不是待恢复事务；
+- schema v2 的 `failed-restored`/`superseded-verified` 是已验证终态；旧 schema v1 `failed`
+  必须由只读 reconcile 分类，不能仅凭时间或当前健康状态自动关闭；
 - supervisor 持续等待且 `docker version` 失败：先恢复 Docker Desktop/WSL 集成，
   不手工绕过容器准入。
 
@@ -160,12 +181,17 @@ systemd Collector 每五分钟短暂读取凭据并原子更新 `latest-{1,6,24,
 备份含数据库、配置和明文凭据：目录必须 `0700`、归档必须 `0600`，异机副本必须
 加密。`drill` 在隔离 PostgreSQL 容器中恢复，不写生产库。72 小时用于灰度，168 小时
 用于单机稳定基线；容器 recreate 会重新计时。单机备份不等于高可用。
+freshness 检查还要求归档为当前用户拥有的单硬链接普通文件；时间戳最多允许 300 秒时钟偏差，
+更远的“未来备份”会 fail closed，不能用负 age 冒充新鲜备份。
+检查入库的 hardened user unit 只允许写 `PROJECT_ROOT/backups` 和告警目录；若配置外部
+`MODELPORT_BACKUP_DIR`，必须同时提供经过评审的 systemd drop-in，将精确目标加入
+`ReadWritePaths=`。否则 `ProtectSystem=strict` 会按设计拒绝写入，不能通过放宽整个文件系统绕过。
 
 ## 缓存
 
 Prompt RAM Cache 自动工作；稳定 system prompt、工具定义和规则放在前部，动态内容
-放在尾部可提高命中。`slot-cache.sh` 保存的 KV 可能包含完整 Prompt，只能用于合成
-前缀实验，保持 `0600`，不得提交或复制到公共存储。
+放在尾部可提高命中。本基线不提供手工 KV snapshot 入口；KV 状态可能编码完整 Prompt，
+不应持久化、提交或复制到公共存储。
 
 存储盘点和清理默认只读；GC 仅把超过保留期的 `.part`/`.tmp` 列为候选，不会自动删除 GGUF、
 当前部署、事务或回滚锚点：

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +39,12 @@ SUPERVISOR_SPEC = importlib.util.spec_from_file_location(
 assert SUPERVISOR_SPEC and SUPERVISOR_SPEC.loader
 SUPERVISOR = importlib.util.module_from_spec(SUPERVISOR_SPEC)
 SUPERVISOR_SPEC.loader.exec_module(SUPERVISOR)
+DOC_COMMAND_SPEC = importlib.util.spec_from_file_location(
+    "check_doc_commands", ROOT_DIR / "scripts" / "check-doc-commands.py"
+)
+assert DOC_COMMAND_SPEC and DOC_COMMAND_SPEC.loader
+DOC_COMMANDS = importlib.util.module_from_spec(DOC_COMMAND_SPEC)
+DOC_COMMAND_SPEC.loader.exec_module(DOC_COMMANDS)
 
 
 class LocalHttpTests(unittest.TestCase):
@@ -89,14 +97,139 @@ class EnvironmentTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
-    def test_manifest_tracks_every_declared_repository_configuration_file(self) -> None:
+    def test_manifest_mapping_covers_runtime_and_acceptance_integrity_entrypoints(self) -> None:
+        tracked = set(VERIFY_MANIFEST.CONFIGURATION_FILES.values())
+        required = {
+            ".github/workflows/ci.yml",
+            ".gitignore",
+            "AGENTS.md",
+            "LICENSE",
+            "compose.yaml",
+            "deployments/qwen3.5-9b-rtx5070ti/README.md",
+            "scripts/model-manager.py",
+            "scripts/runtime.sh",
+            "scripts/runtime_identity.py",
+            "scripts/acceptance-suite.sh",
+            "scripts/acceptance-evidence.py",
+            "scripts/smoke-test.sh",
+            "scripts/reasoning-smoke.sh",
+            "scripts/modelport-smoke.sh",
+            "scripts/modelport-reasoning-smoke.py",
+            "scripts/modelport-reasoning-smoke.sh",
+            "scripts/modelport-token-count-smoke.sh",
+            "scripts/modelport-context-admission-smoke.sh",
+            "scripts/context-acceptance.py",
+            "scripts/modelport-context-acceptance.sh",
+            "scripts/decode-benchmark.py",
+            "scripts/concurrency-benchmark.py",
+            "profiles/alerting.local.env.example",
+            "profiles/operations.env",
+            "docs/MODELPORT.md",
+            "models/README.md",
+        }
+        self.assertTrue(required.issubset(tracked), sorted(required - tracked))
+        expected = VERIFY_MANIFEST.expected_configuration()
+        self.assertIn("controlPlanePackageSha256", expected)
+        self.assertIn("unitTestPackageSha256", expected)
+        self.assertIn("architectureDecisionsSha256", expected)
+        self.assertEqual(
+            expected["repositoryMaterialPolicy"],
+            VERIFY_MANIFEST.REPOSITORY_MATERIAL_POLICY_ID,
+        )
+        self.assertEqual(
+            expected["fileSetMaterialPolicy"],
+            VERIFY_MANIFEST.FILE_SET_SHA256_POLICY_ID,
+        )
+
+    def test_repository_material_inventory_has_exact_declared_coverage(self) -> None:
+        spec = VERIFY_MANIFEST.REPOSITORY_SNAPSHOT_SPEC
+        declared = set(VERIFY_MANIFEST.CONFIGURATION_FILES.values())
+        spec.require_paths(ROOT_DIR, declared)
+        inventory = spec.inventory(ROOT_DIR)
+        self.assertEqual(
+            inventory["policyId"],
+            VERIFY_MANIFEST.REPOSITORY_MATERIAL_POLICY_ID,
+        )
+        self.assertEqual(
+            {item["path"] for item in inventory["files"]},
+            declared,
+        )
+        aggregate_paths = {
+            path
+            for material_set in inventory["fileSets"]
+            for path in material_set["paths"]
+        }
+        self.assertTrue(
+            {
+                path.relative_to(ROOT_DIR).as_posix()
+                for path in (ROOT_DIR / "src" / "local_inference_stack").glob("*.py")
+            }.issubset(aggregate_paths)
+        )
+        self.assertTrue(
+            {
+                path.relative_to(ROOT_DIR).as_posix()
+                for path in (ROOT_DIR / "tests").glob("test_*.py")
+            }.issubset(aggregate_paths)
+        )
+        self.assertTrue(
+            {
+                path.relative_to(ROOT_DIR).as_posix()
+                for path in (ROOT_DIR / "docs" / "decisions").glob("*.md")
+            }.issubset(aggregate_paths)
+        )
+
+    def test_repository_snapshot_rejects_policy_drift(self) -> None:
+        drifted = VERIFY_MANIFEST.SnapshotSpec(
+            policy_id="local-inference-stack/repository-configuration-materials-v2",
+            files=VERIFY_MANIFEST.REPOSITORY_SNAPSHOT_SPEC.files,
+            material_sets=VERIFY_MANIFEST.REPOSITORY_SNAPSHOT_SPEC.material_sets,
+        )
+        with self.assertRaisesRegex(RuntimeError, "snapshot policy changed"):
+            drifted.snapshot(
+                ROOT_DIR,
+                expected_policy_id=VERIFY_MANIFEST.REPOSITORY_MATERIAL_POLICY_ID,
+            )
+
+    def test_document_smoke_accepts_only_explicit_migration_attention(self) -> None:
+        attention = {"schemaVersion": 1, "status": "attention", "code": 4}
+        migration = ("migrate", "--check", "--json")
+        self.assertTrue(DOC_COMMANDS.result_is_acceptable(migration, 4, attention))
+        self.assertFalse(
+            DOC_COMMANDS.result_is_acceptable(
+                ("config", "check", "--json"), 4, attention
+            )
+        )
+
+    def test_manifest_declares_every_repository_configuration_material(self) -> None:
         manifest = VERIFY_MANIFEST.json.loads(
             VERIFY_MANIFEST.MANIFEST_PATH.read_text(encoding="utf-8")
         )
+        expected = VERIFY_MANIFEST.expected_configuration()
+        current = manifest["repositoryConfiguration"]
+        self.assertEqual(set(current), set(expected))
+
+        # Digest freshness is the release-check gate.  Keep this unit test focused
+        # on exact material coverage and the surrounding document contract so a
+        # multi-file change can defer the single final manifest refresh.
+        manifest["repositoryConfiguration"] = expected
         self.assertEqual(
-            VERIFY_MANIFEST.verify(manifest["configuration"]),
+            VERIFY_MANIFEST.verify_document(manifest),
             [],
         )
+
+    def test_manifest_cannot_claim_unreviewed_integrated_identities(self) -> None:
+        manifest = VERIFY_MANIFEST.json.loads(
+            VERIFY_MANIFEST.MANIFEST_PATH.read_text(encoding="utf-8")
+        )
+        manifest["gateway"]["reviewedContainerIdentities"] = {
+            "schemaVersion": 1,
+            "status": "reviewed-current",
+            "containers": {"modelport": {}},
+        }
+        issue_keys = {
+            issue["key"] for issue in VERIFY_MANIFEST.verify_document(manifest)
+        }
+        self.assertIn("gateway.reviewedContainerIdentities", issue_keys)
 
     def test_systemd_renderer_escapes_portable_checkout_paths(self) -> None:
         root = Path("/tmp/project with $ and %")
@@ -121,6 +254,21 @@ class ManifestTests(unittest.TestCase):
 class RuntimeSupervisorTests(unittest.TestCase):
     def supervisor(self, root: Path) -> object:
         return SUPERVISOR.RuntimeSupervisor(root_dir=root, sleeper=lambda _: None)
+
+    @staticmethod
+    def safe_original() -> dict[str, object]:
+        return {
+            "healthy": True,
+            "containerHealthy": True,
+            "profile": "latency",
+            "containerName": "qwen35-9b-q5km",
+            "runtimeIdentity": {
+                "sha256": "a" * 64,
+                "configuration": {"profile": "latency"},
+            },
+            "deploymentProfile": {"present": False},
+            "capturedWithoutSecrets": True,
+        }
 
     def test_healthy_runtime_must_also_have_canonical_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -167,6 +315,188 @@ class RuntimeSupervisorTests(unittest.TestCase):
             ):
                 self.assertIs(supervisor.step(), SUPERVISOR.Step.WAIT_DOCKER)
                 note_wait.assert_called_once_with()
+
+    def test_active_transaction_waits_without_probing_or_mutating_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SUPERVISOR.TransactionStore(SUPERVISOR.ProjectPaths(root))
+            store.begin("release", "quick", self.safe_original())
+            supervisor = self.supervisor(root)
+            with (
+                patch.object(supervisor, "docker_available") as docker,
+                patch.object(supervisor, "reconcile") as reconcile,
+                patch.object(supervisor, "reconcile_transaction") as transaction_reconcile,
+            ):
+                self.assertIs(supervisor.step(), SUPERVISOR.Step.WAIT_TRANSACTION)
+                docker.assert_not_called()
+                reconcile.assert_not_called()
+                transaction_reconcile.assert_not_called()
+
+    def test_only_safe_recovery_required_transaction_is_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SUPERVISOR.TransactionStore(SUPERVISOR.ProjectPaths(root))
+            document = store.begin("release", "quick", self.safe_original())
+            store.transition(
+                "recovery_required",
+                expected_id=document["id"],
+                detail="injected failure",
+            )
+            supervisor = self.supervisor(root)
+            with (
+                patch.object(supervisor, "runtime_lock_active", return_value=False),
+                patch.object(supervisor, "docker_available", return_value=True),
+                patch.object(supervisor, "reconcile_transaction", return_value=True) as reconcile,
+            ):
+                self.assertIs(supervisor.step(), SUPERVISOR.Step.RECOVERED)
+                reconcile.assert_called_once_with()
+
+    def test_runtime_lock_contention_waits_before_health_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.supervisor(Path(directory))
+            with (
+                patch.object(supervisor, "runtime_lock_active", return_value=True),
+                patch.object(supervisor, "docker_available") as docker,
+                patch.object(supervisor, "runtime_healthy") as healthy,
+            ):
+                self.assertIs(supervisor.step(), SUPERVISOR.Step.WAIT_LOCK)
+                docker.assert_not_called()
+                healthy.assert_not_called()
+
+
+class RuntimeMutationLockTests(unittest.TestCase):
+    def test_shell_lock_rejects_forged_inherited_file_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            library = ROOT_DIR / "scripts" / "lib" / "deployment.sh"
+            command = (
+                "exec 203</dev/null; exec 204</dev/null; "
+                "export QWEN_RUNTIME_LOCK_HELD=1; "
+                f"source {library}; acquire_runtime_lock {directory}"
+            )
+            result = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("do not reference the project lock files", result.stderr)
+
+    def test_shell_lock_rejects_symlink_without_truncating_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            locks = root / "cache" / "locks"
+            locks.mkdir(parents=True)
+            target = root / "victim"
+            target.write_text("unchanged", encoding="utf-8")
+            target.chmod(0o600)
+            (locks / "runtime.lock").symlink_to(target)
+            library = ROOT_DIR / "scripts" / "lib" / "deployment.sh"
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f"source {library}; acquire_runtime_lock {root}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("non-symlink", result.stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+
+    def test_shell_lock_rejects_unmatched_active_transaction(self) -> None:
+        transaction_id = "9cb16379-23b0-46c4-893d-1b4f9906a9af"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            control = root / "cache" / "control-plane"
+            control.mkdir(parents=True)
+            transaction = {
+                "schemaVersion": 2,
+                "id": transaction_id,
+                "state": "recovery_required",
+            }
+            state = control / "transaction.json"
+            state.write_text(json.dumps(transaction), encoding="utf-8")
+            state.chmod(0o600)
+            library = ROOT_DIR / "scripts" / "lib" / "deployment.sh"
+            command = (
+                f"source {library}; acquire_runtime_lock {root}"
+            )
+            rejected = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("active control transaction", rejected.stderr)
+            accepted = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "QWEN_CONTROL_TRANSACTION_ID": transaction_id},
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+    def test_release_signal_exit_and_recovery_failure_precedence(self) -> None:
+        script = ROOT_DIR / "scripts" / "release-candidate.sh"
+        signalled = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {script}; install_release_traps; kill -TERM $$",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(signalled.returncode, 143)
+        self.assertIn("final status=143", signalled.stderr)
+        precedence = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {script}; release_result_status 1 9",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(precedence.returncode, 0)
+        self.assertEqual(precedence.stdout.strip(), "70")
+
+    def test_direct_release_catalog_gate_fails_before_runtime_commands(self) -> None:
+        script = ROOT_DIR / "scripts" / "release-candidate.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = root / "scripts" / "model-manager.py"
+            manager.parent.mkdir(parents=True)
+            manager.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps({'catalogDeploymentEligible': False}))\n",
+                encoding="utf-8",
+            )
+            manager.chmod(0o700)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    (
+                        f"source {script}; ROOT_DIR={root}; "
+                        "QWEN_CATALOG_ID=provisional-model; "
+                        "require_catalog_deployment_eligible"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 3)
+            self.assertIn("not deployment-eligible", result.stderr)
 
 
 if __name__ == "__main__":

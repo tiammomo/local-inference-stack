@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ except ModuleNotFoundError:
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+BACKUP_FUTURE_SKEW_SECONDS = 300
 PROMETHEUS_LINE = re.compile(
     r"^(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)(?:\{[^}]*\})?\s+(?P<value>[-+0-9.eE]+)$"
 )
@@ -565,40 +567,64 @@ def backup_snapshot(now_ms: int | None = None) -> dict[str, Any]:
     )
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     try:
-        archives = [
-            path
-            for path in directory.glob("modelport-*.tar.gz")
-            if path.is_file() and not path.is_symlink()
-        ]
+        directory_metadata = directory.lstat()
+        archives: list[tuple[Path, os.stat_result]] = []
+        for path in directory.glob("modelport-*.tar.gz"):
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode):
+                archives.append((path, metadata))
         if not archives:
             return {
                 "available": False,
                 "archiveCount": 0,
                 "latestAgeHours": None,
+                "futureTimestamp": False,
                 "securePermissions": False,
             }
-        latest = max(archives, key=lambda path: path.stat().st_mtime_ns)
-        stat = latest.stat()
-        directory_mode = directory.stat().st_mode & 0o777
-        file_mode = stat.st_mode & 0o777
+        _latest, metadata = max(archives, key=lambda item: item[1].st_mtime_ns)
+        age_ms = now_ms - metadata.st_mtime_ns // 1_000_000
         return {
             "available": True,
             "archiveCount": len(archives),
-            "latestAtEpochMs": stat.st_mtime_ns // 1_000_000,
-            "latestAgeHours": round(
-                max(0, now_ms - stat.st_mtime_ns // 1_000_000) / 3_600_000,
-                3,
+            "latestAtEpochMs": metadata.st_mtime_ns // 1_000_000,
+            "latestAgeHours": round(age_ms / 3_600_000, 3),
+            "futureTimestamp": age_ms < -(BACKUP_FUTURE_SKEW_SECONDS * 1000),
+            "latestSizeBytes": metadata.st_size,
+            "securePermissions": (
+                stat.S_ISDIR(directory_metadata.st_mode)
+                and directory_metadata.st_uid == os.getuid()
+                and directory_metadata.st_mode & 0o077 == 0
+                and metadata.st_uid == os.getuid()
+                and metadata.st_nlink == 1
+                and metadata.st_mode & 0o077 == 0
             ),
-            "latestSizeBytes": stat.st_size,
-            "securePermissions": directory_mode & 0o077 == 0 and file_mode & 0o077 == 0,
         }
     except OSError:
         return {
             "available": False,
             "archiveCount": 0,
             "latestAgeHours": None,
+            "futureTimestamp": False,
             "securePermissions": False,
         }
+
+
+def backup_freshness_alert(
+    snapshot: dict[str, Any], maximum_age_hours: float
+) -> dict[str, Any] | None:
+    if not snapshot.get("available"):
+        return {"code": "modelport_backup_missing", "value": False}
+    if snapshot.get("futureTimestamp") is True:
+        return {
+            "code": "modelport_backup_future_timestamp",
+            "value": snapshot.get("latestAgeHours"),
+        }
+    age_hours = snapshot.get("latestAgeHours")
+    if not isinstance(age_hours, (int, float)) or isinstance(age_hours, bool):
+        return {"code": "modelport_backup_stale", "value": age_hours}
+    if age_hours > maximum_age_hours:
+        return {"code": "modelport_backup_stale", "value": age_hours}
+    return None
 
 
 def persistent_service_alerts() -> list[str]:
@@ -797,15 +823,9 @@ def build_report(
                 },
             }
         )
-    if not backups["available"]:
-        alerts.append({"code": "modelport_backup_missing", "value": False})
-    elif backups["latestAgeHours"] > args.backup_max_age_hours:
-        alerts.append(
-            {
-                "code": "modelport_backup_stale",
-                "value": backups["latestAgeHours"],
-            }
-        )
+    backup_alert = backup_freshness_alert(backups, args.backup_max_age_hours)
+    if backup_alert is not None:
+        alerts.append(backup_alert)
     if backups["available"] and not backups["securePermissions"]:
         alerts.append({"code": "modelport_backup_permissions", "value": False})
     if service_alerts:

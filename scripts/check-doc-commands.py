@@ -30,6 +30,9 @@ SAFE_JSON_COMMANDS = (
     ("migrate", "--check", "--json"),
     ("reference", "--check", "--json"),
 )
+SAFE_RESULT_CODES = {
+    ("migrate", "--check", "--json"): {0, 4},
+}
 
 
 def markdown_files() -> list[Path]:
@@ -73,6 +76,23 @@ def run(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def result_is_acceptable(
+    command: tuple[str, ...], process_code: int, document: dict[str, object]
+) -> bool:
+    allowed = SAFE_RESULT_CODES.get(command, {0})
+    result_code = document.get("code")
+    return (
+        document.get("schemaVersion") == 1
+        and isinstance(result_code, int)
+        and process_code == result_code
+        and result_code in allowed
+        and (
+            result_code == 0
+            or (command[0] == "migrate" and document.get("status") == "attention")
+        )
+    )
+
+
 def main() -> int:
     known = set(command_paths())
     issues: list[str] = []
@@ -92,7 +112,7 @@ def main() -> int:
         except json.JSONDecodeError:
             issues.append(f"safe command did not return JSON: ./stack {' '.join(command)}")
             continue
-        if result.returncode != 0 or document.get("code") != 0 or document.get("schemaVersion") != 1:
+        if not result_is_acceptable(command, result.returncode, document):
             issues.append(
                 f"safe command failed: ./stack {' '.join(command)} "
                 f"(process={result.returncode}, result={document.get('code')})"

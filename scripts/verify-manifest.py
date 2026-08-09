@@ -4,25 +4,59 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import sys
 from pathlib import Path
-from typing import Iterable
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+SOURCE_DIR = ROOT_DIR / "src"
+if str(SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(SOURCE_DIR))
+
+from local_inference_stack.materials import (  # noqa: E402
+    FILE_SET_SHA256_POLICY_ID,
+    MaterialSet,
+    SnapshotSpec,
+)
+
+
 MANIFEST_PATH = (
     ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.json"
 )
 CONFIGURATION_FILES = {
+    "agentContractSha256": "AGENTS.md",
+    "gitIgnorePolicySha256": ".gitignore",
+    "projectLicenseSha256": "LICENSE",
+    "projectReadmeSha256": "README.md",
+    "deploymentGuideSha256": "deployments/qwen3.5-9b-rtx5070ti/README.md",
+    "securityPolicySha256": "SECURITY.md",
+    "ciWorkflowSha256": ".github/workflows/ci.yml",
     "pythonVersionSha256": ".python-version",
     "nodeVersionSha256": ".nvmrc",
     "composeSha256": "compose.yaml",
     "latencyProfileSha256": "profiles/latency.env",
+    "throughputProfileSha256": "profiles/throughput.env",
     "candidateProfileSha256": "profiles/candidate.env",
+    "backupProfileExampleSha256": "profiles/backup.local.env.example",
+    "alertingProfileExampleSha256": "profiles/alerting.local.env.example",
+    "operationsProfileSha256": "profiles/operations.env",
     "providerContractSha256": "contracts/local-qwen-provider-v1.json",
     "qualitySuiteSha256": "quality/cases.json",
     "acceptanceSuiteSha256": "scripts/acceptance-suite.sh",
+    "smokeTestSha256": "scripts/smoke-test.sh",
+    "reasoningSmokeSha256": "scripts/reasoning-smoke.sh",
+    "modelportSmokeSha256": "scripts/modelport-smoke.sh",
+    "modelportReasoningSmokeSha256": "scripts/modelport-reasoning-smoke.py",
+    "modelportReasoningSmokeWrapperSha256": "scripts/modelport-reasoning-smoke.sh",
+    "modelportTokenCountSmokeSha256": "scripts/modelport-token-count-smoke.sh",
+    "modelportContextAdmissionSha256": "scripts/modelport-context-admission-smoke.sh",
+    "modelportContextAcceptanceSha256": "scripts/modelport-context-acceptance.sh",
+    "contextAcceptanceSha256": "scripts/context-acceptance.py",
+    "qualityEvaluatorSha256": "scripts/quality-eval.py",
+    "performancePolicyEvaluatorSha256": "src/local_inference_stack/performance.py",
+    "decodeBenchmarkSha256": "scripts/decode-benchmark.py",
+    "concurrencyBenchmarkSha256": "scripts/concurrency-benchmark.py",
     "compatibilityCheckSha256": "scripts/compatibility-check.py",
     "modelCatalogSha256": "catalog/models.json",
     "modelManagerSha256": "scripts/model-manager.py",
@@ -52,7 +86,7 @@ CONFIGURATION_FILES = {
     "docLinkCheckSha256": "scripts/check-doc-links.py",
     "docCommandCheckSha256": "scripts/check-doc-commands.py",
     "deploymentLibrarySha256": "scripts/lib/deployment.sh",
-    "deploymentVerifierSha256": "scripts/verify-deployment.py",
+    "integratedDeploymentVerifierSha256": "scripts/verify-integrated-deployment.py",
     "manifestVerifierSha256": "scripts/verify-manifest.py",
     "acceptanceEvidenceWriterSha256": "scripts/acceptance-evidence.py",
     "environmentUtilsSha256": "scripts/env_utils.py",
@@ -61,6 +95,14 @@ CONFIGURATION_FILES = {
     "secretsProvisionerSha256": "scripts/provision-operations-secrets.py",
     "environmentGuideSha256": "docs/ENVIRONMENT.md",
     "apiGuideSha256": "docs/API.md",
+    "gettingStartedGuideSha256": "docs/GETTING_STARTED.md",
+    "hardwareGuideSha256": "docs/HARDWARE_GUIDE.md",
+    "modelArtifactsGuideSha256": "models/README.md",
+    "modelportGuideSha256": "docs/MODELPORT.md",
+    "architectureGuideSha256": "docs/ARCHITECTURE.md",
+    "operationsGuideSha256": "docs/OPERATIONS.md",
+    "acceptanceGuideSha256": "docs/ACCEPTANCE.md",
+    "roadmapGuideSha256": "docs/ROADMAP.md",
     "upgradingGuideSha256": "docs/UPGRADING.md",
     "docsIndexSha256": "docs/README.md",
     "contributingGuideSha256": "CONTRIBUTING.md",
@@ -72,40 +114,50 @@ CONFIGURATION_FILES = {
     "modelportOperationsContractSha256": "contracts/modelport-operations-v1.json",
     "stackLauncherSha256": "stack",
 }
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def sha256_file_set(paths: Iterable[Path]) -> str:
-    entries = [
-        {
-            "path": path.relative_to(ROOT_DIR).as_posix(),
-            "sha256": sha256_file(path),
-        }
-        for path in sorted(paths)
-    ]
-    body = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(body).hexdigest()
+REPOSITORY_MATERIAL_POLICY_ID = (
+    "local-inference-stack/repository-configuration-materials-v1"
+)
+REPOSITORY_MATERIAL_SETS = (
+    MaterialSet(
+        key="architectureDecisionsSha256",
+        policy_id=FILE_SET_SHA256_POLICY_ID,
+        includes=("docs/decisions/*.md",),
+    ),
+    MaterialSet(
+        key="systemdTemplatesSha256",
+        policy_id=FILE_SET_SHA256_POLICY_ID,
+        includes=("deploy/systemd/*.in",),
+    ),
+    MaterialSet(
+        key="controlPlanePackageSha256",
+        policy_id=FILE_SET_SHA256_POLICY_ID,
+        includes=("src/local_inference_stack/*.py",),
+    ),
+    MaterialSet(
+        key="unitTestPackageSha256",
+        policy_id=FILE_SET_SHA256_POLICY_ID,
+        includes=("tests/test_*.py",),
+    ),
+)
+REPOSITORY_SNAPSHOT_SPEC = SnapshotSpec.from_mapping(
+    policy_id=REPOSITORY_MATERIAL_POLICY_ID,
+    files=CONFIGURATION_FILES,
+    material_sets=REPOSITORY_MATERIAL_SETS,
+)
 
 
 def expected_configuration() -> dict[str, str]:
-    values = {
-        key: sha256_file(ROOT_DIR / relative)
-        for key, relative in CONFIGURATION_FILES.items()
-    }
-    values["systemdTemplatesSha256"] = sha256_file_set(
-        (ROOT_DIR / "deploy" / "systemd").glob("*.in")
+    values = REPOSITORY_SNAPSHOT_SPEC.snapshot(
+        ROOT_DIR,
+        expected_policy_id=REPOSITORY_MATERIAL_POLICY_ID,
     )
-    values["controlPlanePackageSha256"] = sha256_file_set(
-        (ROOT_DIR / "src" / "local_inference_stack").glob("*.py")
+    values.update(
+        {
+            "repositoryMaterialPolicy": REPOSITORY_MATERIAL_POLICY_ID,
+            "fileSetMaterialPolicy": FILE_SET_SHA256_POLICY_ID,
+        }
     )
-    return values
+    return dict(sorted(values.items()))
 
 
 def verify(configuration: dict[str, str]) -> list[dict[str, str]]:
@@ -125,16 +177,107 @@ def verify(configuration: dict[str, str]) -> list[dict[str, str]]:
     return issues
 
 
+def verify_document(manifest: object) -> list[dict[str, str]]:
+    if not isinstance(manifest, dict):
+        return [
+            {
+                "key": "manifest",
+                "actual": type(manifest).__name__,
+                "expected": "object",
+            }
+        ]
+    issues: list[dict[str, str]] = []
+    if manifest.get("schemaVersion") != 2:
+        issues.append(
+            {
+                "key": "schemaVersion",
+                "actual": str(manifest.get("schemaVersion", "<missing>")),
+                "expected": "2",
+            }
+        )
+    validation = manifest.get("validation")
+    if (
+        not isinstance(validation, dict)
+        or validation.get("status") != "provisional-legacy"
+        or validation.get("automaticDeploymentEligible") is not False
+        or validation.get("historicalEvidenceOnly") is not True
+    ):
+        issues.append(
+            {
+                "key": "validation",
+                "actual": "invalid-or-deployment-eligible",
+                "expected": "provisional-legacy/non-deployable/historical-only",
+            }
+        )
+    performance = manifest.get("performance")
+    if (
+        not isinstance(performance, dict)
+        or performance.get("schemaVersion") != 1
+        or performance.get("policy") != "pending-baseline"
+        or performance.get("calibrationRuns") != 0
+    ):
+        issues.append(
+            {
+                "key": "performance",
+                "actual": "invalid-or-unreviewed-policy",
+                "expected": "schema-v1 pending-baseline with zero calibration runs",
+            }
+        )
+    gateway = manifest.get("gateway")
+    reviewed_identities = (
+        gateway.get("reviewedContainerIdentities")
+        if isinstance(gateway, dict)
+        else None
+    )
+    if (
+        not isinstance(reviewed_identities, dict)
+        or reviewed_identities.get("schemaVersion") != 1
+        or reviewed_identities.get("status") != "review-required"
+        or not isinstance(reviewed_identities.get("reason"), str)
+        or not reviewed_identities.get("reason")
+        or reviewed_identities.get("containers") != {}
+    ):
+        issues.append(
+            {
+                "key": "gateway.reviewedContainerIdentities",
+                "actual": "invalid-or-unreviewed-identity-claimed-current",
+                "expected": "schema-v1 review-required with no reviewed containers",
+            }
+        )
+    historical = manifest.get("validatedConfiguration")
+    if not isinstance(historical, dict) or not historical:
+        issues.append(
+            {
+                "key": "validatedConfiguration",
+                "actual": "missing-or-empty",
+                "expected": "preserved historical validation hashes",
+            }
+        )
+    current = manifest.get("repositoryConfiguration")
+    if not isinstance(current, dict):
+        issues.append(
+            {
+                "key": "repositoryConfiguration",
+                "actual": type(current).__name__,
+                "expected": "object",
+            }
+        )
+    else:
+        issues.extend(verify(current))
+    return issues
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    issues = verify(manifest.get("configuration", {}))
+    issues = verify_document(manifest)
     result = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "status": "passed" if not issues else "failed",
         "manifest": str(MANIFEST_PATH.relative_to(ROOT_DIR)),
+        "validationStatus": (manifest.get("validation") or {}).get("status"),
         "issues": issues,
     }
     if args.json:

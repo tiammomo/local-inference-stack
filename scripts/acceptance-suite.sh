@@ -5,10 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODELPORT_DIR="${MODELPORT_PROJECT_DIR:-}"
 MODE="quick"
 RECORD="true"
+BASELINE_ONLY="false"
+PERFORMANCE_ARGS=()
 ACCEPTANCE_PROFILE="${QWEN_ACCEPTANCE_PROFILE:-latency}"
 STARTED_AT="$(date --iso-8601=seconds)"
 STARTED_EPOCH="$(date +%s)"
 CURRENT_STEP="initialization"
+RUN_MANIFEST=""
+ACCEPTANCE_RUNNER_TOKEN=""
+PERFORMANCE_STARTED_AT=""
+PERFORMANCE_FINISHED_AT=""
+PERFORMANCE_DURATION="0"
 
 # shellcheck source=scripts/lib/deployment.sh
 source "$ROOT_DIR/scripts/lib/deployment.sh"
@@ -22,6 +29,9 @@ while [[ $# -gt 0 ]]; do
     --no-record)
       RECORD="false"
       ;;
+    --baseline-only)
+      BASELINE_ONLY="true"
+      ;;
     -h|--help|help)
       MODE="help"
       ;;
@@ -33,9 +43,46 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "$BASELINE_ONLY" == "true" && "$MODE" != "full" ]]; then
+  printf '%s\n' '--baseline-only is restricted to the full performance suite.' >&2
+  exit 2
+fi
+
+if [[ "$BASELINE_ONLY" == "true" ]]; then
+  PERFORMANCE_ARGS+=(--baseline-only)
+  RECORD="false"
+  printf '%s\n' \
+    'Baseline-only mode collects private performance evidence and cannot write host acceptance evidence.'
+fi
+
 if [[ "$ACCEPTANCE_PROFILE" != "latency" ]]; then
   printf 'Host acceptance evidence is restricted to the validated latency profile.\n' >&2
   exit 2
+fi
+
+# A deploy-triggered quick smoke is part of the approved transaction, not host
+# qualification.  Bind it to the current strict Catalog and selected profile
+# before opening an evidence record or sending a model request.
+assert_approved_catalog_spec "$ROOT_DIR" true
+
+# A pending/failed performance policy is a pre-admission failure: it must stop a
+# normal full run before acceptance evidence is opened or any model request runs.
+if [[ "$MODE" == "full" ]]; then
+  CURRENT_STEP="Performance policy preflight"
+  PERFORMANCE_STARTED_AT="$(date --iso-8601=seconds)"
+  performance_started_epoch="$(date +%s)"
+  printf '\n[%s] %s\n' "$PERFORMANCE_STARTED_AT" "$CURRENT_STEP"
+  set +e
+  python3 "$ROOT_DIR/src/local_inference_stack/performance.py" \
+    "${PERFORMANCE_ARGS[@]}"
+  performance_status=$?
+  set -e
+  PERFORMANCE_FINISHED_AT="$(date --iso-8601=seconds)"
+  performance_finished_epoch="$(date +%s)"
+  PERFORMANCE_DURATION=$((performance_finished_epoch - performance_started_epoch))
+  if [[ $performance_status -ne 0 ]]; then
+    exit "$performance_status"
+  fi
 fi
 
 if [[ "$RECORD" == "true" && "$MODE" != "help" ]]; then
@@ -44,7 +91,16 @@ if [[ "$RECORD" == "true" && "$MODE" != "help" ]]; then
   mkdir -p "$RECORD_DIR"
   RECORD_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   RECORD_BASE="$RECORD_DIR/$RECORD_STAMP-$MODE"
+  RUN_MANIFEST="$RECORD_BASE.run.json"
+  ACCEPTANCE_RUNNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   exec > >(tee "$RECORD_BASE.log") 2>&1
+  LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN="$ACCEPTANCE_RUNNER_TOKEN" \
+    python3 "$ROOT_DIR/scripts/acceptance-evidence.py" run-start \
+    --output "$RUN_MANIFEST" \
+    --mode "$MODE" \
+    --catalog-model-id "$QWEN_CATALOG_ID" \
+    --profile "$ACCEPTANCE_PROFILE" \
+    --started-at "$STARTED_AT"
 fi
 
 record_exit() {
@@ -53,22 +109,23 @@ record_exit() {
     return "$status"
   fi
   set +e
-  local finished_at finished_epoch duration result_status
+  local finished_at finished_epoch duration
   finished_at="$(date --iso-8601=seconds)"
   finished_epoch="$(date +%s)"
   duration=$((finished_epoch - STARTED_EPOCH))
-  result_status="$([[ $status -eq 0 ]] && printf passed || printf failed)"
-  if ! python3 "$ROOT_DIR/scripts/acceptance-evidence.py" \
-    --output "$RECORD_BASE.json" \
-    --mode "$MODE" \
-    --status "$result_status" \
-    --exit-code "$status" \
-    --failed-at-step "$CURRENT_STEP" \
-    --started-at "$STARTED_AT" \
+  if ! LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN="$ACCEPTANCE_RUNNER_TOKEN" \
+    python3 "$ROOT_DIR/scripts/acceptance-evidence.py" run-finish \
+    --manifest "$RUN_MANIFEST" \
     --finished-at "$finished_at" \
     --duration-seconds "$duration" \
-    --catalog-model-id "$QWEN_CATALOG_ID" \
-    --profile "$ACCEPTANCE_PROFILE"; then
+    --exit-code "$status" \
+    --failed-at-step "$CURRENT_STEP"; then
+    printf 'Failed to finalize acceptance run manifest.\n' >&2
+    [[ $status -ne 0 ]] || status=1
+  elif ! LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN="$ACCEPTANCE_RUNNER_TOKEN" \
+    python3 "$ROOT_DIR/scripts/acceptance-evidence.py" write \
+    --output "$RECORD_BASE.json" \
+    --run-manifest "$RUN_MANIFEST"; then
     printf 'Failed to write acceptance evidence.\n' >&2
     [[ $status -ne 0 ]] || status=1
   fi
@@ -80,23 +137,47 @@ record_exit() {
 trap record_exit EXIT
 
 usage() {
-  printf 'Usage: %s {quick|standard|full}\n' "$0"
+  printf 'Usage: %s {quick|standard|full} [--no-record] [--baseline-only]\n' "$0"
   printf '  quick     local tests, runtime health, generation, and reasoning\n'
   printf '  standard  quick + ModelPort contract, token count, dashboard, Tool Use\n'
   printf '  full      standard + 118K/92K context and performance benchmarks\n'
+  printf '  --baseline-only  full-only, private non-promotable baseline collection\n'
 }
 
 run_step() {
   local name="$1"
   shift
+  local step_started_at step_started_epoch step_finished_at step_finished_epoch
+  local step_duration step_status
   CURRENT_STEP="$name"
-  printf '\n[%s] %s\n' "$(date --iso-8601=seconds)" "$name"
+  step_started_at="$(date --iso-8601=seconds)"
+  step_started_epoch="$(date +%s)"
+  printf '\n[%s] %s\n' "$step_started_at" "$name"
+  set +e
   "$@"
+  step_status=$?
+  set -e
+  step_finished_at="$(date --iso-8601=seconds)"
+  step_finished_epoch="$(date +%s)"
+  step_duration=$((step_finished_epoch - step_started_epoch))
+  if [[ "$RECORD" == "true" ]]; then
+    LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN="$ACCEPTANCE_RUNNER_TOKEN" \
+      python3 "$ROOT_DIR/scripts/acceptance-evidence.py" run-step \
+      --manifest "$RUN_MANIFEST" \
+      --name "$name" \
+      --started-at "$step_started_at" \
+      --finished-at "$step_finished_at" \
+      --duration-seconds "$step_duration" \
+      --exit-code "$step_status"
+  fi
+  return "$step_status"
 }
 
 quick_suite() {
-  run_step "Local unit tests" "$ROOT_DIR/scripts/unit-tests.sh"
-  run_step "Artifact integrity" "$ROOT_DIR/scripts/verify-models.sh" --active --cached
+  run_step "Local unit tests" \
+    python3 -m unittest discover -s "$ROOT_DIR/tests" -p 'test_*.py' -v
+  run_step "Artifact integrity" \
+    "$ROOT_DIR/scripts/model-manager.py" verify --cached
   run_step "Runtime status" "$ROOT_DIR/scripts/runtime.sh" status
   run_step "Canonical runtime profile" \
     "$ROOT_DIR/scripts/runtime.sh" assert-profile "$ACCEPTANCE_PROFILE"
@@ -165,14 +246,26 @@ standard_suite() {
 }
 
 full_suite() {
+  if [[ "$RECORD" == "true" ]]; then
+    LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN="$ACCEPTANCE_RUNNER_TOKEN" \
+      python3 "$ROOT_DIR/scripts/acceptance-evidence.py" run-step \
+      --manifest "$RUN_MANIFEST" \
+      --name "Performance policy preflight" \
+      --started-at "$PERFORMANCE_STARTED_AT" \
+      --finished-at "$PERFORMANCE_FINISHED_AT" \
+      --duration-seconds "$PERFORMANCE_DURATION" \
+      --exit-code 0
+  fi
   standard_suite
-  run_step "Full artifact rehash" "$ROOT_DIR/scripts/verify-models.sh" --full
+  run_step "Full artifact rehash" \
+    "$ROOT_DIR/scripts/model-manager.py" verify --full
   run_step "118K direct context" python3 "$ROOT_DIR/scripts/context-acceptance.py"
   run_step "92K ModelPort reasoning context" \
     "$ROOT_DIR/scripts/modelport-context-acceptance.sh"
-  run_step "Decode benchmark" python3 "$ROOT_DIR/scripts/decode-benchmark.py"
+  run_step "Decode benchmark" \
+    python3 "$ROOT_DIR/scripts/decode-benchmark.py" "${PERFORMANCE_ARGS[@]}"
   run_step "Concurrency benchmark" \
-    python3 "$ROOT_DIR/scripts/concurrency-benchmark.py"
+    python3 "$ROOT_DIR/scripts/concurrency-benchmark.py" "${PERFORMANCE_ARGS[@]}"
   run_step "Repeated synthetic quality suite" \
     python3 "$ROOT_DIR/scripts/quality-eval.py" --trials 3
   run_step "Forty-case closed-loop Tool Use suite" \

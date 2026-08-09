@@ -1,49 +1,27 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "profiles": {
     "candidate": {
-      "description": "Serial release-candidate profile; production is stopped first.",
+      "description": "Serial release-candidate mode; selected Catalog model capacity is preserved and production is stopped first.",
       "environment": {
-        "QWEN_BATCH_SIZE": "2048",
         "QWEN_CACHE_DIR": "./cache/candidate",
-        "QWEN_CACHE_RAM": "8192",
-        "QWEN_CACHE_TYPE_K": "q8_0",
-        "QWEN_CACHE_TYPE_V": "q8_0",
         "QWEN_COMPOSE_PROJECT": "qwen35-candidate",
         "QWEN_CONTAINER_NAME": "qwen35-9b-candidate",
-        "QWEN_CTX_SIZE": "131072",
         "QWEN_NETWORK_ALIAS": "qwen-runtime",
-        "QWEN_N_PREDICT": "32768",
         "QWEN_PARALLEL": "1",
-        "QWEN_PUBLISH_PORT": "18081",
-        "QWEN_RESTART_POLICY": "no",
-        "QWEN_UBATCH_SIZE": "1024"
+        "QWEN_PUBLISH_PORT": "18081"
       }
     },
     "latency": {
-      "description": "Default single-user/Agent profile: one full 128K slot.",
+      "description": "Default single-user/Agent latency mode: one slot using the selected Catalog model capacity.",
       "environment": {
-        "QWEN_BATCH_SIZE": "2048",
-        "QWEN_CACHE_RAM": "8192",
-        "QWEN_CACHE_TYPE_K": "q8_0",
-        "QWEN_CACHE_TYPE_V": "q8_0",
-        "QWEN_CTX_SIZE": "131072",
-        "QWEN_N_PREDICT": "32768",
-        "QWEN_PARALLEL": "1",
-        "QWEN_UBATCH_SIZE": "1024"
+        "QWEN_PARALLEL": "1"
       }
     },
     "throughput": {
-      "description": "Optional two-Agent profile: two 64K slots sharing the total KV budget.",
+      "description": "Optional two-Agent throughput mode: two slots sharing the selected Catalog model context and KV budget.",
       "environment": {
-        "QWEN_BATCH_SIZE": "2048",
-        "QWEN_CACHE_RAM": "8192",
-        "QWEN_CACHE_TYPE_K": "q8_0",
-        "QWEN_CACHE_TYPE_V": "q8_0",
-        "QWEN_CTX_SIZE": "131072",
-        "QWEN_N_PREDICT": "32768",
-        "QWEN_PARALLEL": "2",
-        "QWEN_UBATCH_SIZE": "1024"
+        "QWEN_PARALLEL": "2"
       }
     }
   }

@@ -8,7 +8,6 @@ import contextlib
 import fcntl
 import hashlib
 import json
-import math
 import os
 import re
 import shlex
@@ -19,27 +18,72 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 try:
     from scripts.env_utils import atomic_write_private_text
     from scripts.runtime_identity import (
         acceptance_configuration,
+        artifact_stat_fingerprint,
+        atomic_write_private_project_text,
         configured_runtime_image,
+        deployment_values,
+        ensure_private_project_directory,
+        local_artifact_identity,
         live_container,
         live_runtime_sha256,
+        open_private_project_file,
     )
 except ModuleNotFoundError:  # Direct execution from scripts/.
     from env_utils import atomic_write_private_text
     from runtime_identity import (
         acceptance_configuration,
+        artifact_stat_fingerprint,
+        atomic_write_private_project_text,
         configured_runtime_image,
+        deployment_values,
+        ensure_private_project_directory,
+        local_artifact_identity,
         live_container,
         live_runtime_sha256,
+        open_private_project_file,
     )
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT_DIR / "src"))
+
+from local_inference_stack.paths import ProjectPaths  # noqa: E402
+from local_inference_stack.result import RecoveryError  # noqa: E402
+from local_inference_stack.transactions import TransactionStore  # noqa: E402
+from local_inference_stack.catalog import (  # noqa: E402
+    CatalogError,
+    automatic_deployment_supported,
+    fits,
+    load_catalog as read_catalog,
+    matches_recorded_hardware_profile,
+    matches_validated_hardware_profile,
+    model_by_id as catalog_model_by_id,
+    recommend,
+    resolve_catalog_path,
+    resources_available_now,
+)
+from local_inference_stack.deployment import (  # noqa: E402
+    CatalogDeploymentSpec,
+    DeploymentSpecError,
+    bind_approved_catalog_spec,
+    build_deployment_plan,
+)
+from local_inference_stack.configuration import (  # noqa: E402
+    catalog_deployment_environment,
+    selected_deployment_values_mode,
+)
+from local_inference_stack.host import environment_kind  # noqa: E402
+from local_inference_stack.acceptance import (  # noqa: E402
+    run_manifest_matches_evidence,
+    run_record_valid,
+    validation_input,
+)
+
 CATALOG_PATH = ROOT_DIR / "catalog" / "models.json"
 LOCAL_PROFILE = ROOT_DIR / "profiles" / "deployment.local.env"
 MODELS_DIR = ROOT_DIR / "models"
@@ -52,172 +96,24 @@ ACCEPTANCE_FUTURE_SKEW = timedelta(seconds=300)
 HOST_FINGERPRINT_TYPE = "machine-id-sha256-v1"
 HOST_FINGERPRINT_CONTEXT = b"local-inference-stack.acceptance-host.v1\0"
 MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
+TRUSTED_ATTESTATION_KEY_ENV = "LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY"
+TRUSTED_ATTESTATION_KEY_SHA256_ENV = (
+    "LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY_SHA256"
+)
 
 
 def load_catalog() -> dict[str, Any]:
-    catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-    if catalog.get("schemaVersion") != 1 or not catalog.get("models"):
-        raise SystemExit(f"unsupported or empty catalog: {CATALOG_PATH}")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", catalog.get("updatedAt", "")):
-        raise SystemExit("catalog updatedAt must be an ISO calendar date")
-    policy = catalog.get("artifactPolicy", {})
-    if policy.get("licenseReviewRequired") is not True:
-        raise SystemExit("catalog must require an explicit third-party license review")
-    ids: set[str] = set()
-    for model in catalog["models"]:
-        model_id = model.get("id", "")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]+", model_id) or model_id in ids:
-            raise SystemExit(f"invalid or duplicate model id in catalog: {model_id!r}")
-        ids.add(model_id)
-        for text_field in (
-            "displayName",
-            "quantization",
-            "purpose",
-            "servedModelId",
-        ):
-            if not isinstance(model.get(text_field), str) or not model[text_field].strip():
-                raise SystemExit(f"invalid {text_field} for {model_id}")
-        if not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]+", model.get("servedModelId", "")
-        ):
-            raise SystemExit(f"unsafe servedModelId for {model_id}")
-        directory = Path(model.get("modelDirectory", ""))
-        if directory.is_absolute() or ".." in directory.parts or len(directory.parts) != 1:
-            raise SystemExit(f"unsafe model directory for {model_id}: {directory}")
-        if model.get("status") not in {"estimated", "validated"}:
-            raise SystemExit(f"invalid evidence status for {model_id}: {model.get('status')!r}")
-        if model.get("status") == "validated":
-            signature = model.get("validatedHardware", {})
-            if (
-                not isinstance(model.get("validation"), str)
-                or not model["validation"].strip()
-                or not isinstance(signature.get("gpuName"), str)
-                or not signature["gpuName"].strip()
-                or not isinstance(signature.get("gpuCount"), int)
-                or isinstance(signature.get("gpuCount"), bool)
-                or signature["gpuCount"] != 1
-                or not isinstance(signature.get("minVramGiB"), (int, float))
-                or isinstance(signature.get("minVramGiB"), bool)
-                or not math.isfinite(signature["minVramGiB"])
-                or signature["minVramGiB"] <= 0
-                or not isinstance(signature.get("minRamGiB"), (int, float))
-                or isinstance(signature.get("minRamGiB"), bool)
-                or not math.isfinite(signature["minRamGiB"])
-                or signature["minRamGiB"] <= 0
-            ):
-                raise SystemExit(f"incomplete validated hardware metadata for {model_id}")
-        for revision_field in ("modelRevision", "artifactRevision"):
-            if not re.fullmatch(r"[0-9a-f]{40}", model.get(revision_field, "")):
-                raise SystemExit(f"invalid {revision_field} for {model_id}")
-        for repository_field in ("modelRepository", "artifactRepository"):
-            if not re.fullmatch(
-                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
-                model.get(repository_field, ""),
-            ):
-                raise SystemExit(f"invalid {repository_field} for {model_id}")
-        license_metadata = model.get("license", {})
-        expected_license_source = (
-            f"https://huggingface.co/{model.get('modelRepository', '')}/blob/"
-            f"{model.get('modelRevision', '')}/LICENSE"
-        )
-        if (
-            not re.fullmatch(r"[A-Za-z0-9.+-]+", license_metadata.get("spdx", ""))
-            or license_metadata.get("source") != expected_license_source
-            or license_metadata.get("reviewRequired") is not True
-            or not re.fullmatch(
-                r"\d{4}-\d{2}-\d{2}", license_metadata.get("metadataVerifiedAt", "")
-            )
-        ):
-            raise SystemExit(f"incomplete license metadata for {model_id}")
-        requirements = model.get("requirements", {})
-        required_capacity = (
-            "minVramGiB",
-            "recommendedVramGiB",
-            "minRamGiB",
-            "minFreeDiskGiB",
-        )
-        if any(
-            not isinstance(requirements.get(field), (int, float))
-            or isinstance(requirements.get(field), bool)
-            or not math.isfinite(requirements[field])
-            or requirements[field] <= 0
-            for field in required_capacity
-        ):
-            raise SystemExit(f"invalid hardware requirements for {model_id}")
-        if requirements["recommendedVramGiB"] < requirements["minVramGiB"]:
-            raise SystemExit(f"recommended VRAM is below minimum for {model_id}")
-        runtime = model.get("runtime", {})
-        runtime_fields = (
-            "contextTokens",
-            "recommendedInputTokens",
-            "maxOutputTokens",
-            "cacheRamMiB",
-            "batchSize",
-            "ubatchSize",
-        )
-        if any(
-            not isinstance(runtime.get(field), int)
-            or isinstance(runtime.get(field), bool)
-            or runtime[field] <= 0
-            for field in runtime_fields
-        ):
-            raise SystemExit(f"invalid runtime capacity for {model_id}")
-        if (
-            runtime["recommendedInputTokens"] + runtime["maxOutputTokens"]
-            >= runtime["contextTokens"]
-        ):
-            raise SystemExit(f"runtime token budget has no safety margin for {model_id}")
-        primaries = [item for item in model.get("artifacts", []) if item.get("role") == "model"]
-        if len(primaries) != 1:
-            raise SystemExit(f"{model_id} must define exactly one primary model artifact")
-        filenames: set[str] = set()
-        for artifact in model["artifacts"]:
-            filename = Path(artifact.get("filename", ""))
-            url = urlparse(artifact.get("url", ""))
-            if filename.is_absolute() or len(filename.parts) != 1 or filename.name != str(filename):
-                raise SystemExit(f"unsafe artifact filename for {model_id}: {filename}")
-            if url.scheme != "https" or url.hostname != "huggingface.co":
-                raise SystemExit(f"unapproved artifact URL for {model_id}: {url.geturl()}")
-            if url.query != "download=true" or url.fragment:
-                raise SystemExit(
-                    f"artifact URL must use only the reviewed download query for {model_id}"
-                )
-            if str(filename) in filenames:
-                raise SystemExit(f"duplicate artifact filename for {model_id}: {filename}")
-            filenames.add(str(filename))
-            if not isinstance(artifact.get("required"), bool):
-                raise SystemExit(f"artifact required flag must be boolean for {model_id}")
-            if not isinstance(artifact.get("role"), str) or not artifact["role"].strip():
-                raise SystemExit(f"invalid artifact role for {model_id}")
-            expected_path = (
-                f"/{model['artifactRepository']}/resolve/"
-                f"{model['artifactRevision']}/{filename}"
-            )
-            if url.path != expected_path:
-                raise SystemExit(
-                    f"artifact URL is not pinned to the reviewed revision for "
-                    f"{model_id}/{filename}"
-                )
-            if not re.fullmatch(r"[0-9a-f]{64}", artifact.get("sha256", "")):
-                raise SystemExit(f"invalid SHA256 for {model_id}/{filename}")
-            if not isinstance(artifact.get("bytes"), int) or artifact["bytes"] <= 0:
-                raise SystemExit(f"invalid artifact size for {model_id}/{filename}")
-        required_bytes = sum(
-            artifact["bytes"] for artifact in model["artifacts"] if artifact["required"]
-        )
-        if requirements["minFreeDiskGiB"] * 1024**3 < required_bytes:
-            raise SystemExit(f"minimum free disk is below required artifacts for {model_id}")
-    if catalog.get("defaultModel") not in ids:
-        raise SystemExit("catalog defaultModel does not reference a reviewed entry")
-    return catalog
+    try:
+        return read_catalog(CATALOG_PATH)
+    except CatalogError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def model_by_id(catalog: dict[str, Any], model_id: str) -> dict[str, Any]:
-    for model in catalog["models"]:
-        if model["id"] == model_id:
-            return model
-    choices = ", ".join(model["id"] for model in catalog["models"])
-    raise SystemExit(f"unknown model {model_id!r}; catalog choices: {choices}")
+    try:
+        return catalog_model_by_id(catalog, model_id)
+    except CatalogError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def command_output(command: list[str]) -> str | None:
@@ -243,10 +139,6 @@ def memory_inventory() -> tuple[float, float]:
         values.get("MemTotal", 0) / 1024 / 1024,
         values.get("MemAvailable", 0) / 1024 / 1024,
     )
-
-
-def total_ram_gib() -> float:
-    return round(memory_inventory()[0], 1)
 
 
 def gpu_inventory() -> list[dict[str, Any]]:
@@ -318,6 +210,10 @@ def host_assessment(vram_override: float | None, ram_override: float | None) -> 
     )
     return {
         "platform": sys.platform,
+        "environmentKind": environment_kind(
+            system=sys.platform,
+            kernel_release=os.uname().release,
+        ),
         "architecture": os.uname().machine,
         "gpus": gpus,
         "totalVramGiB": round(sum(gpu["vramGiB"] for gpu in gpus), 1),
@@ -351,56 +247,123 @@ def host_assessment(vram_override: float | None, ram_override: float | None) -> 
     }
 
 
-def fits(model: dict[str, Any], host: dict[str, Any]) -> bool:
-    requirements = model["requirements"]
-    return (
-        host.get("platform", "linux") == "linux"
-        and host.get("architecture", "x86_64") in {"x86_64", "amd64"}
-        and host["largestGpuVramGiB"] >= requirements["minVramGiB"]
-        and host["ramGiB"] >= requirements["minRamGiB"]
-        and host["freeDiskGiB"] >= requirements["minFreeDiskGiB"]
-    )
+def catalog_attestation_verification(
+    model: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Cryptographically verify catalog promotion against an external trust root.
 
+    Catalog booleans are descriptive metadata and are never authorization. The
+    public-key path and its expected SHA256 must be supplied outside the catalog.
+    """
 
-def resources_available_now(model: dict[str, Any], host: dict[str, Any]) -> bool:
-    return (
-        fits(model, host)
-        and host.get("largestFreeVramGiB", host["largestGpuVramGiB"])
-        >= model["requirements"]["minVramGiB"]
-        and host.get("availableRamGiB", host["ramGiB"])
-        >= model["requirements"]["minRamGiB"]
-    )
-
-
-def automatic_deployment_supported(host: dict[str, Any]) -> bool:
-    return len(host["gpus"]) == 1
-
-
-def recommend(catalog: dict[str, Any], host: dict[str, Any]) -> dict[str, Any] | None:
-    candidates = [model for model in catalog["models"] if fits(model, host)]
-    if not candidates:
+    if not model or model.get("status") != "validated":
         return None
-    return max(candidates, key=lambda model: model["requirements"]["minVramGiB"])
-
-
-def matches_validated_hardware_profile(
-    model: dict[str, Any] | None, host: dict[str, Any]
-) -> bool:
-    if not model or model.get("status") != "validated" or "validatedHardware" not in model:
-        return False
-    signature = model["validatedHardware"]
-    return (
-        len(host["gpus"]) == signature["gpuCount"]
-        and all(gpu["name"] == signature["gpuName"] for gpu in host["gpus"])
-        and host["largestGpuVramGiB"] >= signature["minVramGiB"]
-        and host["ramGiB"] >= signature["minRamGiB"]
+    metadata = model.get("validationAttestation")
+    if not isinstance(metadata, dict):
+        return None
+    key_name = os.environ.get(TRUSTED_ATTESTATION_KEY_ENV)
+    trusted_fingerprint = os.environ.get(TRUSTED_ATTESTATION_KEY_SHA256_ENV)
+    key_path = Path(key_name) if key_name else None
+    if (
+        key_path is None
+        or not key_path.is_absolute()
+        or not trusted_fingerprint
+        or not re.fullmatch(r"[0-9a-f]{64}", trusted_fingerprint)
+        or trusted_fingerprint != metadata.get("trustedKeySha256")
+    ):
+        return None
+    document_path = resolve_catalog_path(
+        ROOT_DIR, metadata.get("documentPath"), suffixes=(".json",)
     )
+    signature_path = resolve_catalog_path(
+        ROOT_DIR,
+        metadata.get("signaturePath"),
+        suffixes=(".sig", ".minisig", ".signature"),
+    )
+    if document_path is None or signature_path is None:
+        return None
+    try:
+        from local_inference_stack import attestation as attestation_policy
+
+        facts = attestation_policy.verify_detached(
+            ProjectPaths(ROOT_DIR),
+            document_path,
+            signature_path,
+            key_path.resolve(),
+            metadata.get("tool"),
+            trusted_key_sha256=trusted_fingerprint,
+            require_promotion=True,
+        )
+    except (Exception, SystemExit):
+        return None
+    if (
+        facts.get("payloadSha256") != metadata.get("payloadSha256")
+        or facts.get("promotionEligible") is not True
+        or (facts.get("subject") or {}).get("modelId") != model.get("id")
+        or (facts.get("subject") or {}).get("mode") != "full"
+        or (facts.get("subject") or {}).get("profile") != "latency"
+        or not _attested_hardware_matches_profile(
+            model, (facts.get("subject") or {}).get("hardware")
+        )
+        or (facts.get("signature") or {}).get("trustedKeyFingerprint") is not True
+    ):
+        return None
+    return facts
+
+
+def _attested_hardware_matches_profile(
+    model: dict[str, Any], hardware: Any
+) -> bool:
+    """Bind promotion metadata to the host facts carried by the signature."""
+
+    profile = model.get("validatedHardware")
+    if not isinstance(profile, dict) or not isinstance(hardware, dict):
+        return False
+    gpus = hardware.get("gpus")
+    if not isinstance(gpus, list) or len(gpus) != profile.get("gpuCount"):
+        return False
+    return bool(
+        hardware.get("environmentKind") == profile.get("environmentKind")
+        and hardware.get("architecture") == profile.get("architecture")
+        and isinstance(hardware.get("ramGiB"), (int, float))
+        and not isinstance(hardware.get("ramGiB"), bool)
+        and hardware["ramGiB"] >= profile.get("minRamGiB", float("inf"))
+        and all(
+            isinstance(gpu, dict)
+            and gpu.get("name") == profile.get("gpuName")
+            and isinstance(gpu.get("vramGiB"), (int, float))
+            and not isinstance(gpu.get("vramGiB"), bool)
+            and gpu["vramGiB"] >= profile.get("minVramGiB", float("inf"))
+            for gpu in gpus
+        )
+    )
+
+
+def catalog_deployment_eligible(model: dict[str, Any] | None) -> bool:
+    if (
+        not model
+        or model.get("status") != "validated"
+        or model.get("lifecycleRole") != "lts"
+    ):
+        return False
+    eligibility = model.get("deploymentEligibility", {})
+    metadata = model.get("validationAttestation", {})
+    if (
+        eligibility.get("automatic") is not True
+        or metadata.get("mode") != "full"
+    ):
+        return False
+    # A static signatureVerified=true (including in a locally edited catalog)
+    # deliberately has no effect. Only fresh detached verification can authorize.
+    return catalog_attestation_verification(model) is not None
 
 
 def caveats(
     host: dict[str, Any],
     model: dict[str, Any] | None,
     host_acceptance: dict[str, Any] | None = None,
+    *,
+    catalog_eligible: bool | None = None,
 ) -> list[str]:
     notes: list[str] = []
     if not host["gpus"]:
@@ -437,8 +400,9 @@ def caveats(
         )
     elif model and not matches_validated_hardware_profile(model, host):
         notes.append(
-            "This hardware does not match a recorded validation profile; treat the "
-            "candidate as estimated until host acceptance passes."
+            "This host has no matching current validated Tier-1 profile; the Catalog "
+            "record may be provisional or the environment/GPU may differ. Keep it "
+            "read-only until qualification and promotion pass."
         )
     if model and host["largestGpuVramGiB"] < model["requirements"]["minVramGiB"]:
         notes.append(
@@ -460,6 +424,18 @@ def caveats(
                 f"Available RAM ({host.get('availableRamGiB', 0):.1f} GiB) is below "
                 f"the {model['requirements']['minRamGiB']} GiB deployment threshold."
             )
+    if model and not (
+        catalog_deployment_eligible(model)
+        if catalog_eligible is None
+        else catalog_eligible
+    ):
+        reason = (model.get("deploymentEligibility") or {}).get(
+            "reason", "signed-full-attestation-required"
+        )
+        notes.append(
+            "Catalog entry is a read-only candidate and cannot produce deployment "
+            f"commands ({reason})."
+        )
     return notes
 
 
@@ -554,6 +530,20 @@ def acceptance_matches_host(
         or recorded_artifact.get("integrityVerified") is not True
     ):
         return False
+    try:
+        current_artifact_identity = local_artifact_identity(
+            model_path(model) / artifact["filename"],
+            INTEGRITY_DIR / f"{model['id']}--{artifact['filename']}.sha256.stamp",
+            expected_bytes=artifact["bytes"],
+            expected_sha256=artifact["sha256"],
+            project_root=ROOT_DIR,
+        )
+    except RuntimeError:
+        # A stale/missing stamp never triggers a read-only planner rehash. The
+        # normal verify/quick path will perform the required full SHA256 check.
+        return False
+    if recorded_artifact.get("localIdentity") != current_artifact_identity:
+        return False
     expected_configuration = acceptance_configuration(
         model,
         evidence["mode"],
@@ -563,12 +553,36 @@ def acceptance_matches_host(
     if any(
         recorded_configuration.get(key) != value
         for key, value in expected_configuration.items()
+        if key != "catalogSha256"
     ):
+        return False
+    try:
+        current_catalog = read_catalog(CATALOG_PATH)
+        current_model = next(
+            item for item in current_catalog["models"] if item["id"] == model["id"]
+        )
+        expected_validation_input = validation_input(
+            current_catalog, current_model, expected_configuration
+        )
+    except (CatalogError, KeyError, StopIteration, ValueError):
+        return False
+    if evidence.get("validationInput") != expected_validation_input:
+        return False
+    if not run_record_valid(
+        evidence.get("run"),
+        mode=evidence["mode"],
+        overall_status=evidence["status"],
+        overall_exit_code=evidence["exitCode"],
+        configuration=recorded_configuration,
+    ):
+        return False
+    if not acceptance_run_manifest_matches(evidence):
         return False
     recorded_host = evidence.get("host", {})
     current_fingerprint = host_fingerprint()
     if (
         recorded_host.get("platform") != host.get("platform")
+        or recorded_host.get("environmentKind") != host.get("environmentKind")
         or recorded_host.get("architecture") != host.get("architecture")
         or recorded_host.get("ramGiB", 0) < model["requirements"]["minRamGiB"]
         or host.get("ramGiB", 0) < model["requirements"]["minRamGiB"]
@@ -638,6 +652,60 @@ def read_secure_evidence(path: Path) -> dict[str, Any] | None:
             os.close(descriptor)
 
 
+def secure_evidence_sha256(path: Path) -> str | None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or metadata.st_size > 1024 * 1024
+        ):
+            return None
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def acceptance_run_manifest_matches(evidence: dict[str, Any]) -> bool:
+    run_record = evidence.get("run")
+    identity = run_record.get("manifest") if isinstance(run_record, dict) else None
+    source = identity.get("sourcePath") if isinstance(identity, dict) else None
+    if not isinstance(source, str):
+        return False
+    relative = Path(source)
+    if (
+        relative.is_absolute()
+        or relative.parts[:2] != ("logs", "acceptance")
+        or not relative.name.endswith(".run.json")
+        or ".." in relative.parts
+    ):
+        return False
+    path = ROOT_DIR / relative
+    manifest = read_secure_evidence(path)
+    source_sha = secure_evidence_sha256(path)
+    return bool(
+        manifest
+        and source_sha
+        and source_sha == identity.get("sourceSha256")
+        and run_manifest_matches_evidence(manifest, run_record, evidence)
+    )
+
+
 def discover_host_acceptance(
     model: dict[str, Any] | None, host: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -688,8 +756,9 @@ def plan_for_host(
     hardware_fits = bool(selected and fits(selected, host))
     resources_available = bool(selected and resources_available_now(selected, host))
     automatic_supported = automatic_deployment_supported(host)
+    catalog_eligible = catalog_deployment_eligible(selected)
     hardware_profile_match = matches_validated_hardware_profile(selected, host)
-    ready = bool(
+    host_admitted = bool(
         hardware_fits
         and resources_available
         and automatic_supported
@@ -700,9 +769,23 @@ def plan_for_host(
         and host.get("curl", {}).get("available", False)
         and host.get("python", {}).get("supported", False)
         and host.get("commands", {}).get("flock", False)
+        and hardware_profile_match
         and not simulation
     )
-    plan_caveats = caveats(host, selected, host_acceptance)
+    ready = bool(host_admitted and catalog_eligible)
+    action_plan = None
+    if selected and ready:
+        deployment_spec = CatalogDeploymentSpec.from_catalog_model(selected)
+        action_plan = build_deployment_plan(
+            deployment_spec,
+            admission_granted=True,
+        ).document()
+    plan_caveats = caveats(
+        host,
+        selected,
+        host_acceptance,
+        catalog_eligible=catalog_eligible,
+    )
     if simulation:
         plan_caveats.append(
             "Capacity overrides are simulation-only; they never authorize deployment commands."
@@ -727,8 +810,13 @@ def plan_for_host(
         "catalogEvidenceStatus": (
             "validated-profile"
             if selected and selected.get("status") == "validated"
-            else "estimated-profile"
+            else (
+                "provisional-legacy-profile"
+                if selected and selected.get("status") == "provisional"
+                else "estimated-profile"
+            )
         ),
+        "catalogDeploymentEligible": catalog_eligible,
         "hardwareProfileMatch": hardware_profile_match,
         "hostAcceptancePolicy": {
             "schemaVersion": ACCEPTANCE_SCHEMA_VERSION,
@@ -745,19 +833,11 @@ def plan_for_host(
         "hostAcceptanceEvidence": host_acceptance,
         "fits": hardware_fits,
         "resourceAvailableNow": resources_available,
+        "hostAdmissionPassed": host_admitted,
         "automaticDeploymentSupported": automatic_supported,
         "readyToDeploy": ready,
+        "actionPlan": action_plan,
         "caveats": plan_caveats,
-        "nextCommands": (
-            [
-                f"./scripts/model-manager.py download --model {selected['id']} --yes",
-                f"./scripts/model-manager.py select --model {selected['id']} --yes",
-                "./scripts/runtime.sh start latency",
-                "./scripts/acceptance-suite.sh quick",
-            ]
-            if selected and ready
-            else []
-        ),
     }
 
 
@@ -830,26 +910,83 @@ def print_plan(payload: dict[str, Any], as_json: bool) -> None:
             f"resourcesAvailableNow={str(payload['resourceAvailableNow']).lower()}; "
             f"automaticDeploymentSupported="
             f"{str(payload['automaticDeploymentSupported']).lower()}; "
+            f"catalogDeploymentEligible="
+            f"{str(payload['catalogDeploymentEligible']).lower()}; "
             f"readyToDeploy={str(payload['readyToDeploy']).lower()}"
         )
+        if "readyToStartExisting" in payload:
+            print(
+                "  Existing selection recovery: "
+                f"readyToStartExisting={str(payload['readyToStartExisting']).lower()}"
+            )
     else:
-        print("Recommendation: none; this catalog only automates NVIDIA CUDA hosts with >=2 GiB VRAM")
+        print("Recommendation: none; no evidence-backed Catalog entry fits this host")
     for note in payload["caveats"]:
         print(f"  NOTE: {note}")
-    if payload["nextCommands"]:
-        print("No state was changed. After reviewing size, status, license, and source:")
-        for command in payload["nextCommands"]:
-            print(f"  {command}")
+    if payload["actionPlan"]:
+        print(
+            "No state was changed. A typed deployment plan is available; "
+            "after review, use ./stack deploy --model "
+            f"{recommendation['id']} --yes"
+        )
     else:
         print("No state was changed. Deployment commands are withheld by the admission policy.")
 
 
-def admission_payload(catalog: dict[str, Any], model_id: str) -> dict[str, Any]:
+def admission_payload(
+    catalog: dict[str, Any],
+    model_id: str,
+    *,
+    existing_selection: bool = False,
+) -> dict[str, Any]:
     args = argparse.Namespace(model=model_id)
     host = host_assessment(None, None)
     model = model_by_id(catalog, model_id)
     acceptance = discover_host_acceptance(model, host)
-    return plan_for_host(args, catalog, host, acceptance)
+    payload = plan_for_host(args, catalog, host, acceptance)
+    if existing_selection:
+        selected = selected_model(catalog, None) if LOCAL_PROFILE.is_file() else None
+        try:
+            selected_values = deployment_values() if selected else {}
+        except (OSError, RuntimeError, ValueError):
+            selected_values = {}
+        selection_mode = selected_deployment_values_mode(model, selected_values)
+        selection_matches = bool(
+            selected
+            and selected["id"] == model_id
+            and selection_mode != "mismatch"
+        )
+        recovery_hardware_match = matches_recorded_hardware_profile(model, host)
+        recovery_host_admitted = bool(
+            fits(model, host)
+            and resources_available_now(model, host)
+            and automatic_deployment_supported(host)
+            and host["docker"]["available"]
+            and host["dockerCompose"]["available"]
+            and host["dockerCompose"].get("configurationCompatible", False)
+            and host["nvidiaContainerRuntime"]
+            and host.get("curl", {}).get("available", False)
+            and host.get("python", {}).get("supported", False)
+            and host.get("commands", {}).get("flock", False)
+            and recovery_hardware_match
+        )
+        payload["mode"] = "read-only-existing-selection-admission"
+        payload["selectedConfigurationMatchesCatalog"] = selection_matches
+        payload["selectedConfigurationMode"] = (
+            selection_mode if selection_matches else "mismatch"
+        )
+        payload["recoveryHardwareProfileMatch"] = recovery_hardware_match
+        payload["recoveryHostAdmissionPassed"] = recovery_host_admitted
+        payload["readyToStartExisting"] = bool(
+            selection_matches and recovery_host_admitted
+        )
+        if payload["readyToStartExisting"]:
+            payload["caveats"].append(
+                "Recovery is authorized only for the already selected private "
+                "Catalog projection on this exact recorded host; it does not "
+                "authorize download, selection, or a new deployment."
+            )
+    return payload
 
 
 def require_deployment_admission(
@@ -871,13 +1008,97 @@ def confirmation_required(args: argparse.Namespace, action: str) -> None:
         )
 
 
+def approved_catalog_action(
+    args: argparse.Namespace,
+    catalog: dict[str, Any],
+    *,
+    require_artifact: bool = False,
+) -> tuple[dict[str, Any], Any | None]:
+    """Bind a mutating child action to the active Catalog-spec approval."""
+
+    model = model_by_id(catalog, args.model)
+    catalog_spec_sha256 = getattr(args, "catalog_spec_sha256", None)
+    artifact_sha256 = getattr(args, "artifact_sha256", None)
+    transaction_id = os.environ.get("QWEN_CONTROL_TRANSACTION_ID")
+    if catalog_spec_sha256 is None:
+        if artifact_sha256 is not None or transaction_id:
+            raise SystemExit(
+                "transactional model action requires --catalog-spec-sha256"
+            )
+        return model, None
+    if not transaction_id:
+        raise SystemExit(
+            "--catalog-spec-sha256 requires QWEN_CONTROL_TRANSACTION_ID"
+        )
+    if require_artifact and artifact_sha256 is None:
+        raise SystemExit("transactional download requires --artifact-sha256")
+    try:
+        spec, artifact = bind_approved_catalog_spec(
+            catalog,
+            model["id"],
+            catalog_spec_sha256,
+            artifact_sha256=artifact_sha256,
+        )
+        TransactionStore(ProjectPaths(ROOT_DIR)).assert_approved_deployment(
+            transaction_id=transaction_id,
+            catalog_spec_sha256=spec.sha256,
+            catalog_id=spec.catalog_id,
+            artifact_sha256=artifact_sha256,
+            inherited_locks=os.environ.get("QWEN_RUNTIME_LOCK_HELD") == "1",
+        )
+    except (DeploymentSpecError, RecoveryError) as error:
+        raise SystemExit(str(error)) from error
+    return model, artifact
+
+
+def assert_deployment_binding(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
+    """Verify current Catalog, transaction approval, and selected local profile."""
+
+    model, _artifact = approved_catalog_action(args, catalog)
+    if args.selected:
+        try:
+            actual = deployment_values()
+        except (OSError, RuntimeError, ValueError) as error:
+            raise SystemExit(f"cannot read selected deployment profile safely: {error}") from error
+        expected = deployment_environment(model)
+        if actual != expected:
+            raise SystemExit(
+                "selected deployment profile does not match the approved Catalog spec"
+            )
+    print(f"approved_catalog_spec={args.catalog_spec_sha256} model={model['id']}")
+
+
+@contextlib.contextmanager
+def authorized_download_boundary(
+    args: argparse.Namespace,
+    model: dict[str, Any],
+    approved_artifact: Any | None,
+) -> Any:
+    if args.catalog_spec_sha256 is None:
+        yield
+        return
+    try:
+        with TransactionStore(ProjectPaths(ROOT_DIR)).authorized_runtime_mutation(
+            os.environ.get("QWEN_CONTROL_TRANSACTION_ID"),
+            catalog_spec_sha256=args.catalog_spec_sha256,
+            catalog_id=model["id"],
+            artifact_sha256=(
+                approved_artifact.sha256 if approved_artifact is not None else None
+            ),
+        ):
+            yield
+    except RecoveryError as error:
+        raise SystemExit(str(error)) from error
+
+
 def model_path(model: dict[str, Any]) -> Path:
     return MODELS_DIR / model["modelDirectory"]
 
 
-def sha256(path: Path) -> str:
+def sha256_descriptor(descriptor: int) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(descriptor), "rb") as handle:
         for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -885,13 +1106,53 @@ def sha256(path: Path) -> str:
 
 @contextlib.contextmanager
 def exclusive_local_lock(name: str) -> Any:
+    if not isinstance(name, str) or not name or Path(name).name != name:
+        raise SystemExit(f"unsafe local lock name: {name!r}")
     lock_dir = ROOT_DIR / "cache" / "locks"
-    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    lock_dir.chmod(0o700)
     path = lock_dir / f"{name}.lock"
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    directory_descriptor: int | None = None
+    descriptor: int | None = None
     try:
+        ensure_private_project_directory(lock_dir, project_root=ROOT_DIR)
+        directory_descriptor = open_private_project_directory(lock_dir)
+        descriptor = os.open(
+            path.name,
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        named = os.stat(
+            path.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            os.close(descriptor)
+            raise SystemExit(f"unsafe local lock file: {path}")
         os.fchmod(descriptor, 0o600)
+    except RuntimeError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise SystemExit(str(error)) from error
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise SystemExit(f"cannot safely open local lock: {path}: {error}") from error
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+    try:
+        assert descriptor is not None
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -901,30 +1162,301 @@ def exclusive_local_lock(name: str) -> Any:
         os.close(descriptor)
 
 
+def open_private_project_directory(path: Path) -> int:
+    """Open a project directory one no-follow component at a time."""
+
+    project_root = Path(os.path.abspath(ROOT_DIR))
+    absolute = Path(os.path.abspath(path))
+    try:
+        absolute.relative_to(project_root)
+    except ValueError as error:
+        raise SystemExit(f"download directory escapes the project root: {path}") from error
+    flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open("/", flags)
+    try:
+        for component in absolute.parts[1:]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise SystemExit(
+                f"download directory is not private and current-user-owned: {path}"
+            )
+        result = descriptor
+        descriptor = -1
+        return result
+    except OSError as error:
+        raise SystemExit(f"cannot safely open download directory: {path}: {error}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextlib.contextmanager
+def secure_partial_file(
+    partial: Path, *, maximum_bytes: int
+) -> Any:
+    """Create/open a resumable partial through a private no-follow dirfd."""
+
+    directory_descriptor = open_private_project_directory(partial.parent)
+    descriptor: int | None = None
+    try:
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(
+            partial.name,
+            flags,
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        named = os.stat(
+            partial.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size > maximum_bytes
+            or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise SystemExit(f"unsafe partial artifact path: {partial}")
+        os.fchmod(descriptor, 0o600)
+        yield descriptor, directory_descriptor, metadata.st_size
+    except OSError as error:
+        raise SystemExit(f"cannot safely open partial artifact: {partial}: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_descriptor)
+
+
 def verify_artifact(
     path: Path,
     artifact: dict[str, Any],
     *,
     cached: bool = False,
     cache_key: str | None = None,
+    write_stamp: bool = True,
 ) -> bool:
-    size = path.stat().st_size
-    if size != artifact["bytes"]:
-        raise SystemExit(f"size mismatch for {path}: got {size}, expected {artifact['bytes']}")
-    metadata = path.stat()
-    fingerprint = (
-        f"{metadata.st_dev}:{metadata.st_ino}:{metadata.st_size}:"
-        f"{metadata.st_mtime_ns}:{metadata.st_ctime_ns}"
-    )
-    stamp_path = INTEGRITY_DIR / f"{cache_key or artifact['filename']}.sha256.stamp"
-    expected_stamp = f"{artifact['sha256']}|{fingerprint}"
-    if cached and stamp_path.is_file() and stamp_path.read_text(encoding="utf-8").strip() == expected_stamp:
-        return True
-    actual = sha256(path)
+    stamp_key = cache_key or artifact["filename"]
+    if not isinstance(stamp_key, str) or Path(stamp_key).name != stamp_key:
+        raise SystemExit(f"unsafe integrity stamp key: {stamp_key!r}")
+    stamp_path = INTEGRITY_DIR / f"{stamp_key}.sha256.stamp"
+    if write_stamp:
+        try:
+            ensure_private_project_directory(INTEGRITY_DIR, project_root=ROOT_DIR)
+        except RuntimeError as error:
+            raise SystemExit(str(error)) from error
+
+    descriptor: int | None = None
+    try:
+        descriptor, metadata, _relative = open_private_project_file(
+            path, project_root=ROOT_DIR
+        )
+    except FileNotFoundError as error:
+        raise SystemExit(f"missing artifact: {path}") from error
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+    try:
+        if metadata.st_size != artifact["bytes"]:
+            raise SystemExit(
+                f"size mismatch for {path}: got {metadata.st_size}, "
+                f"expected {artifact['bytes']}"
+            )
+        fingerprint = artifact_stat_fingerprint(metadata)
+        expected_stamp = f"{artifact['sha256']}|{fingerprint}"
+
+        if cached:
+            stamp_descriptor: int | None = None
+            try:
+                stamp_descriptor, stamp_metadata, _stamp_relative = (
+                    open_private_project_file(
+                        stamp_path,
+                        project_root=ROOT_DIR,
+                        maximum_bytes=4096,
+                    )
+                )
+                with os.fdopen(os.dup(stamp_descriptor), "rb") as handle:
+                    stamp_body = handle.read(4097)
+                if artifact_stat_fingerprint(os.fstat(stamp_descriptor)) != (
+                    artifact_stat_fingerprint(stamp_metadata)
+                ):
+                    raise SystemExit(
+                        f"integrity stamp changed while it was inspected: {stamp_path}"
+                    )
+                try:
+                    stamp_value = stamp_body.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    stamp_value = ""
+                if stamp_value == expected_stamp:
+                    if artifact_stat_fingerprint(os.fstat(descriptor)) != fingerprint:
+                        raise SystemExit(
+                            f"artifact changed while its cached identity was inspected: {path}"
+                        )
+                    return True
+            except FileNotFoundError:
+                pass
+            except RuntimeError as error:
+                raise SystemExit(str(error)) from error
+            finally:
+                if stamp_descriptor is not None:
+                    os.close(stamp_descriptor)
+
+        actual = sha256_descriptor(descriptor)
+        if artifact_stat_fingerprint(os.fstat(descriptor)) != fingerprint:
+            raise SystemExit(f"artifact changed during SHA256 verification: {path}")
+        if actual != artifact["sha256"]:
+            raise SystemExit(f"SHA256 mismatch for {path}: got {actual}")
+        if write_stamp:
+            try:
+                atomic_write_private_project_text(
+                    stamp_path,
+                    expected_stamp + "\n",
+                    project_root=ROOT_DIR,
+                )
+            except RuntimeError as error:
+                raise SystemExit(str(error)) from error
+        return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def fully_verify_artifact_descriptor(
+    descriptor: int,
+    path: Path,
+    artifact: dict[str, Any],
+) -> os.stat_result:
+    """Hash one already-safe descriptor and reject any in-place mutation."""
+
+    metadata = os.fstat(descriptor)
+    if metadata.st_size != artifact["bytes"]:
+        raise SystemExit(
+            f"size mismatch for {path}: got {metadata.st_size}, "
+            f"expected {artifact['bytes']}"
+        )
+    fingerprint = artifact_stat_fingerprint(metadata)
+    actual = sha256_descriptor(descriptor)
+    final_metadata = os.fstat(descriptor)
+    if artifact_stat_fingerprint(final_metadata) != fingerprint:
+        raise SystemExit(f"artifact changed during SHA256 verification: {path}")
     if actual != artifact["sha256"]:
         raise SystemExit(f"SHA256 mismatch for {path}: got {actual}")
-    atomic_write_private_text(stamp_path, expected_stamp + "\n")
-    return False
+    return final_metadata
+
+
+def open_fully_verified_artifact(
+    path: Path, artifact: dict[str, Any]
+) -> tuple[int, os.stat_result]:
+    """Open and hash one artifact while binding verification to its inode."""
+
+    try:
+        descriptor, _metadata, _relative = open_private_project_file(
+            path, project_root=ROOT_DIR
+        )
+    except FileNotFoundError as error:
+        raise SystemExit(f"missing artifact during promotion: {path}") from error
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+    try:
+        final_metadata = fully_verify_artifact_descriptor(
+            descriptor, path, artifact
+        )
+        return descriptor, final_metadata
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def promote_verified_partial(
+    partial: Path,
+    final: Path,
+    artifact: dict[str, Any],
+    *,
+    source_descriptor: int | None = None,
+    directory_descriptor: int | None = None,
+) -> None:
+    """Atomically promote exactly the inode that was verified, then rehash it."""
+
+    if source_descriptor is None:
+        source_descriptor, source_metadata = open_fully_verified_artifact(
+            partial, artifact
+        )
+    else:
+        source_metadata = fully_verify_artifact_descriptor(
+            source_descriptor, partial, artifact
+        )
+    promoted_descriptor: int | None = None
+    try:
+        os.fsync(source_descriptor)
+        if directory_descriptor is None:
+            directory_descriptor = open_private_project_directory(partial.parent)
+        named_source = os.stat(
+            partial.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(named_source.st_mode)
+            or (named_source.st_dev, named_source.st_ino)
+            != (source_metadata.st_dev, source_metadata.st_ino)
+        ):
+            raise SystemExit(
+                f"partial artifact path changed before promotion: {partial}"
+            )
+        os.replace(
+            partial.name,
+            final.name,
+            src_dir_fd=directory_descriptor,
+            dst_dir_fd=directory_descriptor,
+        )
+        promoted_descriptor, promoted_metadata = open_fully_verified_artifact(
+            final, artifact
+        )
+        if (promoted_metadata.st_dev, promoted_metadata.st_ino) != (
+            source_metadata.st_dev,
+            source_metadata.st_ino,
+        ):
+            raise SystemExit(
+                f"promoted artifact is not the verified source inode: {final}"
+            )
+        named_final = os.stat(
+            final.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (named_final.st_dev, named_final.st_ino) != (
+            promoted_metadata.st_dev,
+            promoted_metadata.st_ino,
+        ):
+            raise SystemExit(f"artifact path changed after promotion: {final}")
+        os.fsync(promoted_descriptor)
+        os.fsync(directory_descriptor)
+    except OSError as error:
+        raise SystemExit(f"cannot safely promote downloaded artifact: {error}") from error
+    finally:
+        if promoted_descriptor is not None:
+            os.close(promoted_descriptor)
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        os.close(source_descriptor)
 
 
 def record_acquisition(
@@ -966,145 +1498,149 @@ def record_acquisition(
 
 def download_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     confirmation_required(args, "download")
-    model = model_by_id(catalog, args.model)
+    model, approved_artifact = approved_catalog_action(
+        args, catalog, require_artifact=True
+    )
+    if approved_artifact is not None and args.all_artifacts:
+        raise SystemExit(
+            "--all-artifacts cannot be combined with an approved artifact identity"
+        )
     require_deployment_admission(catalog, model["id"], "download")
-    with exclusive_local_lock(f"download-{model['id']}"):
+    with authorized_download_boundary(
+        args, model, approved_artifact
+    ), exclusive_local_lock(f"download-{model['id']}"):
         destination = model_path(model)
-        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-        destination.chmod(0o700)
-        artifacts = [
-            artifact
-            for artifact in model["artifacts"]
-            if artifact["required"] or args.all_artifacts
-        ]
+        try:
+            ensure_private_project_directory(destination, project_root=ROOT_DIR)
+        except RuntimeError as error:
+            raise SystemExit(str(error)) from error
+        artifacts = (
+            [
+                artifact
+                for artifact in model["artifacts"]
+                if artifact["sha256"] == approved_artifact.sha256
+            ]
+            if approved_artifact is not None
+            else [
+                artifact
+                for artifact in model["artifacts"]
+                if artifact["required"] or args.all_artifacts
+            ]
+        )
         for artifact in artifacts:
             final = destination / artifact["filename"]
-            if final.is_symlink():
-                raise SystemExit(f"unsafe existing artifact symlink: {final}")
-            if final.exists():
-                metadata = final.lstat()
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_nlink != 1
-                ):
-                    raise SystemExit(f"unsafe existing artifact path: {final}")
+            existing_descriptor: int | None = None
+            try:
+                existing_descriptor, _metadata, _relative = open_private_project_file(
+                    final, project_root=ROOT_DIR
+                )
+            except FileNotFoundError:
+                pass
+            except RuntimeError as error:
+                raise SystemExit(str(error)) from error
+            if existing_descriptor is not None:
+                os.fchmod(existing_descriptor, 0o600)
+                os.close(existing_descriptor)
                 verify_artifact(final, artifact)
-                final.chmod(0o600)
                 record_acquisition(model, artifact, method="verified-existing-local")
                 print(f"verified existing artifact: {final}")
                 continue
             partial = final.with_suffix(final.suffix + ".part")
-            if partial.exists():
-                metadata = partial.lstat()
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_nlink != 1
-                    or metadata.st_size > artifact["bytes"]
-                ):
-                    raise SystemExit(f"unsafe partial artifact path: {partial}")
-                partial_size = metadata.st_size
-            else:
-                partial_size = 0
-            remaining = artifact["bytes"] - partial_size
-            if shutil.disk_usage(destination).free < remaining:
-                raise SystemExit(
-                    f"insufficient free disk for {artifact['filename']}: "
-                    f"need at least {remaining} additional bytes"
-                )
-            print(
-                f"downloading {artifact['bytes'] / 1024**3:.2f} GiB: "
-                f"{artifact['filename']}"
-            )
-            try:
-                subprocess.run(
-                    [
-                        "curl",
-                        "--fail",
-                        "--location",
-                        "--proto",
-                        "=https",
-                        "--proto-redir",
-                        "=https",
-                        "--retry",
-                        "8",
-                        "--retry-all-errors",
-                        "--continue-at",
-                        "-",
-                        "--max-filesize",
-                        str(artifact["bytes"]),
-                        "--output",
-                        str(partial),
-                        artifact["url"],
-                    ],
-                    check=True,
-                )
-                partial.chmod(0o600)
-                verify_artifact(partial, artifact)
-                with partial.open("rb+") as handle:
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                partial.replace(final)
-                final.chmod(0o600)
-                directory_descriptor = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory_descriptor)
-                finally:
-                    os.close(directory_descriptor)
-            except (subprocess.CalledProcessError, OSError):
+            with secure_partial_file(
+                partial, maximum_bytes=artifact["bytes"]
+            ) as (partial_descriptor, directory_descriptor, partial_size):
+                remaining = artifact["bytes"] - partial_size
+                if shutil.disk_usage(destination).free < remaining:
+                    raise SystemExit(
+                        f"insufficient free disk for {artifact['filename']}: "
+                        f"need at least {remaining} additional bytes"
+                    )
                 print(
-                    f"partial download retained for safe resume: {partial}",
-                    file=sys.stderr,
+                    f"downloading {artifact['bytes'] / 1024**3:.2f} GiB: "
+                    f"{artifact['filename']}"
                 )
-                raise
+                try:
+                    subprocess.run(
+                        [
+                            "curl",
+                            "--fail",
+                            "--location",
+                            "--proto",
+                            "=https",
+                            "--proto-redir",
+                            "=https",
+                            "--retry",
+                            "8",
+                            "--retry-all-errors",
+                            "--continue-at",
+                            "-",
+                            "--max-filesize",
+                            str(artifact["bytes"]),
+                            "--output",
+                            f"/proc/self/fd/{partial_descriptor}",
+                            artifact["url"],
+                        ],
+                        check=True,
+                        pass_fds=(partial_descriptor,),
+                    )
+                    os.fsync(partial_descriptor)
+                    promote_verified_partial(
+                        partial,
+                        final,
+                        artifact,
+                        source_descriptor=os.dup(partial_descriptor),
+                        directory_descriptor=os.dup(directory_descriptor),
+                    )
+                except (subprocess.CalledProcessError, OSError):
+                    print(
+                        f"partial download retained for safe resume: {partial}",
+                        file=sys.stderr,
+                    )
+                    raise
             record_acquisition(model, artifact, method="https-download")
             print(f"downloaded and verified: {final}")
 
 
+def deployment_environment(model: dict[str, Any]) -> dict[str, str]:
+    return catalog_deployment_environment(model)
+
+
 def deployment_env(model: dict[str, Any]) -> str:
-    runtime = model["runtime"]
-    artifact = next(item for item in model["artifacts"] if item["role"] == "model")
-    values = {
-        "QWEN_CATALOG_ID": model["id"],
-        "QWEN_MODEL_DIR": f"./models/{model['modelDirectory']}",
-        "QWEN_MODEL_FILE": artifact["filename"],
-        "QWEN_MODEL_DISPLAY_NAME": model["displayName"],
-        "QWEN_QUANTIZATION": model["quantization"],
-        "QWEN_SERVED_MODEL_ID": model["servedModelId"],
-        "QWEN_CONTAINER_NAME": model["id"],
-        "QWEN_RUNTIME_UID": os.getuid(),
-        "QWEN_RUNTIME_GID": os.getgid(),
-        "MODELPORT_NETWORK_NAME": "modelport_default",
-        "QWEN_CTX_SIZE": runtime["contextTokens"],
-        "QWEN_RECOMMENDED_INPUT_TOKENS": runtime["recommendedInputTokens"],
-        "QWEN_N_PREDICT": runtime["maxOutputTokens"],
-        "QWEN_CACHE_RAM": runtime["cacheRamMiB"],
-        "QWEN_BATCH_SIZE": runtime["batchSize"],
-        "QWEN_UBATCH_SIZE": runtime["ubatchSize"],
-    }
+    values = deployment_environment(model)
     return "# Generated by scripts/model-manager.py; local and intentionally untracked.\n" + "".join(
-        f"{key}={shlex.quote(str(value))}\n" for key, value in values.items()
+        f"{key}={shlex.quote(value)}\n" for key, value in values.items()
     )
 
 
 def select_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     confirmation_required(args, "select")
-    model = model_by_id(catalog, args.model)
+    model, _artifact = approved_catalog_action(args, catalog)
     require_deployment_admission(catalog, model["id"], "select")
-    for artifact in model["artifacts"]:
-        if not artifact["required"]:
-            continue
-        path = model_path(model) / artifact["filename"]
-        if not path.is_file():
-            raise SystemExit(f"cannot select a model with a missing artifact: {path}")
-        verify_artifact(
-            path,
-            artifact,
-            cached=True,
-            cache_key=f"{model['id']}--{artifact['filename']}",
+    store = TransactionStore(ProjectPaths(ROOT_DIR))
+    try:
+        boundary = store.authorized_runtime_mutation(
+            os.environ.get("QWEN_CONTROL_TRANSACTION_ID"),
+            catalog_spec_sha256=args.catalog_spec_sha256,
+            catalog_id=model["id"] if args.catalog_spec_sha256 else None,
         )
-    atomic_write_private_text(LOCAL_PROFILE, deployment_env(model))
+        with boundary:
+            for artifact in model["artifacts"]:
+                if not artifact["required"]:
+                    continue
+                path = model_path(model) / artifact["filename"]
+                if not path.is_file():
+                    raise SystemExit(
+                        f"cannot select a model with a missing artifact: {path}"
+                    )
+                verify_artifact(
+                    path,
+                    artifact,
+                    cached=True,
+                    cache_key=f"{model['id']}--{artifact['filename']}",
+                )
+            atomic_write_private_text(LOCAL_PROFILE, deployment_env(model))
+    except RecoveryError as error:
+        raise SystemExit(str(error)) from error
     print(f"selected {model['id']}: {LOCAL_PROFILE}")
 
 
@@ -1136,6 +1672,7 @@ def verify_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
             artifact,
             cached=args.cached,
             cache_key=f"{model['id']}--{artifact['filename']}",
+            write_stamp=not args.read_only,
         )
         found += 1
         suffix = " (cached)" if was_cached else ""
@@ -1279,6 +1816,11 @@ def parse_args() -> argparse.Namespace:
         help="read-only deployment admission for one reviewed catalog model",
     )
     admit_parser.add_argument("--model", required=True)
+    admit_parser.add_argument(
+        "--existing-selection",
+        action="store_true",
+        help="admit recovery of an already selected local model without authorizing a new deployment",
+    )
     admit_parser.add_argument("--json", action="store_true")
     plan_parser = subparsers.add_parser("plan", help="read-only host assessment and recommendation")
     plan_parser.add_argument("--model", help="evaluate an explicit catalog model")
@@ -1289,12 +1831,32 @@ def parse_args() -> argparse.Namespace:
         action_parser = subparsers.add_parser(name)
         action_parser.add_argument("--model", required=True)
         action_parser.add_argument("--yes", action="store_true")
+        action_parser.add_argument(
+            "--catalog-spec-sha256",
+            help="bind a transactional action to its approved Catalog spec",
+        )
         if name == "download":
             action_parser.add_argument("--all-artifacts", action="store_true")
+            action_parser.add_argument(
+                "--artifact-sha256",
+                help="materialize exactly one approved required artifact",
+            )
+    assert_parser = subparsers.add_parser(
+        "assert-deployment",
+        help="verify current Catalog and transaction binding without mutation",
+    )
+    assert_parser.add_argument("--model", required=True)
+    assert_parser.add_argument("--catalog-spec-sha256", required=True)
+    assert_parser.add_argument("--selected", action="store_true")
     verify_parser = subparsers.add_parser("verify", help="verify the selected model against the catalog")
     verify_parser.add_argument("--model")
     verify_parser.add_argument("--full", action="store_true", help="also verify present optional artifacts")
     verify_parser.add_argument("--cached", action="store_true", help="reuse a hash when file identity and metadata match")
+    verify_parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="never create or refresh the local integrity stamp",
+    )
     return parser.parse_args()
 
 
@@ -1306,15 +1868,24 @@ def main() -> int:
     elif args.command == "audit-sources":
         return audit_sources(catalog, args.json)
     elif args.command == "admit":
-        payload = admission_payload(catalog, args.model)
+        payload = admission_payload(
+            catalog, args.model, existing_selection=args.existing_selection
+        )
         print_plan(payload, args.json)
-        return 0 if payload["readyToDeploy"] else 3
+        admitted = (
+            payload.get("readyToStartExisting", False)
+            if args.existing_selection
+            else payload["readyToDeploy"]
+        )
+        return 0 if admitted else 3
     elif args.command == "plan":
         print_plan(plan_payload(args, catalog), args.json)
     elif args.command == "download":
         download_model(args, catalog)
     elif args.command == "select":
         select_model(args, catalog)
+    elif args.command == "assert-deployment":
+        assert_deployment_binding(args, catalog)
     elif args.command == "verify":
         verify_model(args, catalog)
     return 0

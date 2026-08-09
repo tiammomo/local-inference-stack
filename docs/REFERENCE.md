@@ -3,7 +3,7 @@
 > 由 `./stack reference --write --yes` 生成；不要手工编辑。
 
 全局 `--json` 可以放在命令前后。结构化输出和退出码稳定；命令是否改变本地状态、
-是否需要批准，以各节为准。`scripts/` 是高级诊断/兼容接口，不替代这里的公共契约。
+是否需要批准，以各节为准。`scripts/` 不构成公共契约；普通生命周期不要直接调用，只有明确列出它的运维或贡献者 Runbook 例外。
 
 ## 顶层命令
 
@@ -11,7 +11,7 @@
 - `./stack doctor` — 检查平台、依赖、配置和待恢复事务。
 - `./stack status` — 报告 runtime 与持久事务状态。
 - `./stack verify` — 在不改变运行状态的前提下验证仓库、配置或模型。
-- `./stack deploy` — 取得 --yes 批准后只执行 Catalog 生成的部署命令。
+- `./stack deploy` — 取得 --yes 批准后解释绑定 Catalog identity 的类型化部署计划。
 - `./stack accept` — 取得 --yes 批准后运行指定验收层级。
 - `./stack release` — 取得 --yes 批准后执行串行候选发布与生产恢复。
 - `./stack profile` — 通过持久事务切换固定生产 Profile。
@@ -47,25 +47,25 @@
 
 ### `./stack status`
 
-报告 runtime 健康和持久事务状态。
+按 scope 报告 runtime、持久事务和可选联合运维组件；默认只检查 standalone。
 
 - 状态：只读。
 - 批准：不需要。
-- 语法：`./stack status [--json]`
+- 语法：`./stack status [--scope {standalone,integrated,all}] [--json]`
 - 示例：`./stack status --json`
 
 ### `./stack verify`
 
-验证仓库、类型化配置或 Catalog 模型制品。
+验证仓库、类型化配置、Catalog 制品或指定范围的部署组件。
 
 - 状态：只读；可能执行本地测试或模型哈希读取。
 - 批准：不需要。
-- 语法：`./stack verify [--scope {repository,config,model}] [--model CATALOG_ID] [--cached] [--json]`
+- 语法：`./stack verify [--scope {repository,config,model,standalone,integrated,all}] [--model CATALOG_ID] [--cached] [--json]`
 - 示例：`./stack verify --scope config --json`
 
 ### `./stack deploy`
 
-只执行当前只读 plan 返回的 Catalog-backed 部署步骤。
+只解释当前只读 plan 返回且与 Catalog identity 绑定的类型化部署步骤。
 
 - 状态：写入并启动 runtime；可能下载制品。
 - 批准：必须 --yes，且 plan 必须准入。
@@ -146,16 +146,16 @@
 
 ### `./stack attest verify`
 
-校验 attestation 自哈希、仓库状态和可选外部签名。
+校验结构、自哈希和生命周期；分离签名必须显式选择密码学验证，Catalog 晋级还必须用外部固定公钥指纹重检当前输入。
 
 - 状态：只读。
 - 批准：不需要。
-- 语法：`./stack attest verify PATH [--require-signature --tool {minisign,cosign} --public-key PATH --signature PATH] [--json]`
-- 示例：`./stack attest verify attestation.json --json`
+- 语法：`./stack attest verify PATH [--require-signature] [--for-promotion --trusted-key-sha256 SHA256] [--tool {minisign,cosign} --public-key PATH --signature PATH] [--json]`
+- 示例：`./stack attest verify attestation.json --for-promotion --tool minisign --public-key KEY.pub --signature attestation.minisig --trusted-key-sha256 SHA256`
 
 ### `./stack bundle create`
 
-创建带成员清单、大小和哈希的离线复现 bundle。
+仅为 LTS 生命周期条目创建带成员清单、大小和哈希的离线复现 bundle。
 
 - 状态：写离线 bundle；可包含大制品。
 - 批准：必须 --yes。
@@ -236,7 +236,7 @@
 
 ### `./stack migrate`
 
-检查本地 schema 是否为当前或受支持的 N-1 版本，不静默改写。
+按各 schema 的显式可读集合检查兼容性，只报告、不静默改写。
 
 - 状态：只读。
 - 批准：不需要。
@@ -274,8 +274,8 @@
 
 ## 本地 schema 版本
 
-- `attestation`: `1`（当前可读版本；未来版本只读兼容 N-1，禁止静默迁移）
-- `bundle`: `1`（当前可读版本；未来版本只读兼容 N-1，禁止静默迁移）
-- `commandResult`: `1`（当前可读版本；未来版本只读兼容 N-1，禁止静默迁移）
-- `runtimeProfiles`: `1`（当前可读版本；未来版本只读兼容 N-1，禁止静默迁移）
-- `transaction`: `1`（当前可读版本；未来版本只读兼容 N-1，禁止静默迁移）
+- `attestation`: 当前 `2`（仅 v2 可读；v1 缺少当前信任绑定，拒绝读取）
+- `bundle`: 当前 `2`（可读 v1/v2；v1 仅支持纯制品，未绑定镜像 archive 必须重建）
+- `commandResult`: 当前 `1`（仅 v1 可读）
+- `runtimeProfiles`: 当前 `2`（可读 v1/v2；v1 只读检查）
+- `transaction`: 当前 `2`（可读 v1/v2；v1 必须分类并经显式 reconcile 处理）

@@ -6,7 +6,10 @@ services:
     container_name: ${QWEN_CONTAINER_NAME:-qwen35-9b-q5km}
     user: "${QWEN_RUNTIME_UID:-1000}:${QWEN_RUNTIME_GID:-1000}"
     init: true
-    restart: ${QWEN_RESTART_POLICY:-unless-stopped}
+    # The systemd user supervisor is the sole restart/recovery owner.  Keeping
+    # this fixed also prevents an ambient shell variable from creating a
+    # second, Docker-owned lifecycle policy.
+    restart: "no"
     logging:
       driver: json-file
       options:
@@ -31,7 +34,6 @@ services:
     ports:
       - "127.0.0.1:${QWEN_PUBLISH_PORT:-18080}:8080"
     networks:
-      default: {}
       modelport:
         aliases:
           - ${QWEN_NETWORK_ALIAS:-qwen-runtime}

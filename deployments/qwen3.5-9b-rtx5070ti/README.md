@@ -1,6 +1,11 @@
 # Qwen3.5-9B / RTX 5070 Ti
 
-当前唯一实机验证档案。机器可读事实以 [manifest.json](manifest.json) 为准。
+当前唯一历史实机验证档案。机器可读事实以 [manifest.json](manifest.json) 为准；该档案当前标记为
+legacy/provisional，不能作为新部署授权，等待当前代码上的 schema v4 `full`、性能门禁和签名
+attestation 后再晋级。
+历史记录没有保存 ModelPort、PostgreSQL 与 Dashboard 的完整 image/command/environment/bind
+身份，因此 `gateway.reviewedContainerIdentities` 明确为 `review-required`。在干净的 ModelPort
+checkout 上完成联合复核并记录不泄密的 exact identity 前，`verify --scope integrated/all` 会按设计失败。
 
 | 项目 | 基线 |
 | --- | --- |
@@ -12,9 +17,9 @@
 | 思考预算 | 建议输入约 92K，最多输出 32,768 |
 | 接口 | `127.0.0.1:18080`；可选 ModelPort `38082` |
 
-已验证直连生成、思考、118K 召回、92K ModelPort 链路、Tool Use、质量、备份恢复、
+历史运行已验证直连生成、思考、118K 召回、92K ModelPort 链路、Tool Use、质量、备份恢复、
 串行候选和部署漂移检查。典型短解码约 88–90 tok/s，峰值显存低于 12.4GiB；
-这些数据是本机基线，不是其他硬件的承诺。
+这些数据是历史本机基线，不是当前性能门禁，也不是其他硬件的承诺。
 
 `96GB` 记录参考宿主机的物理配置；WSL 发行版在运行时可见的总量和可用量可能更低且会变化。
 部署准入始终使用当前 `plan.host.ramGiB`/`availableRamGiB`，不能仅凭表中的物理标签放行。
@@ -25,11 +30,14 @@
 ```bash
 ./scripts/model-manager.py plan --json
 ./scripts/acceptance-suite.sh quick
-python3 ./scripts/verify-deployment.py
+./stack verify --scope standalone --json
 ```
 
 新主机、驱动、镜像、模型或配置变化后必须重新验收；不能复制本机凭证来继承
 `validated-on-this-host`。
+
+控制面、Profile、证据语义或安全 identity 变化同样会使旧 evidence 失效。当前仓库已冻结本条目的
+新部署资格；在线健康实例可继续运行，但不得通过刷新 manifest 哈希把历史结果冒充为重新验收。
 
 ## WSL 恢复复核（2026-08-02）
 

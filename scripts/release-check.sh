@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WITH_RUNTIME="false"
@@ -17,7 +18,13 @@ git diff --cached --check
 while IFS= read -r document; do
   python3 -m json.tool "$document" >/dev/null
 done < <(git ls-files -co --exclude-standard -- '*.json')
-python3 -m compileall -q src scripts tests
+python3 - <<'PY'
+from pathlib import Path
+
+for directory in (Path("src"), Path("scripts"), Path("tests")):
+    for source in sorted(directory.rglob("*.py")):
+        compile(source.read_bytes(), str(source), "exec")
+PY
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash -n scripts/*.sh scripts/lib/*.sh
 if command -v shellcheck >/dev/null 2>&1; then
@@ -118,14 +125,15 @@ fi
 
 if command -v gitleaks >/dev/null 2>&1; then
   gitleaks git --redact --no-banner
-elif docker image inspect "$GITLEAKS_IMAGE" >/dev/null 2>&1; then
+elif [[ "${ALLOW_DOCKER_GITLEAKS:-false}" == "true" ]] \
+  && docker image inspect "$GITLEAKS_IMAGE" >/dev/null 2>&1; then
   docker run --rm -v "$ROOT_DIR:/repo:ro" -w /repo \
     "$GITLEAKS_IMAGE" git --redact --no-banner --no-color
 elif [[ "${REQUIRE_GITLEAKS:-false}" == "true" ]]; then
   printf 'gitleaks is required but neither the binary nor pinned image is available.\n' >&2
   exit 1
 else
-  printf 'NOTE: gitleaks is not installed; history scan skipped.\n'
+  printf 'NOTE: gitleaks is not installed; history scan skipped (Docker fallback requires ALLOW_DOCKER_GITLEAKS=true).\n'
 fi
 
 if [[ "$WITH_RUNTIME" == "true" ]]; then

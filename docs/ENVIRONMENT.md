@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | Linux/WSL x86_64 | 必需 | 当前自动化的支持平台 |
 | NVIDIA 驱动与容器运行时 | 必需 | llama.cpp CUDA 运行 |
-| Docker Engine + Compose v2 | 必需 | 容器生命周期与固定运行配置 |
+| Docker Engine + Compose v2 | 必需 | 执行容器动作与固定运行配置；不拥有自动恢复策略 |
 | uv + Python 3.11+ | 必需 | Python 控制面；用户服务使用 `.python-version` 的精确版本 |
 | `curl` + util-linux `flock` | 必需 | 本地健康探测和运行变更串行化 |
 | Linux Node.js 24 | 可选 | `.nvmrc` 固定；ModelPort `standard/full` 与 Dashboard 语法检查 |
@@ -65,7 +65,7 @@ uv 的常见用户级位置是：
 | 运行 Profile 权威源 | `config/runtime-profiles.json` | 是 | latency/throughput 的类型化配置 |
 | Profile schema | `config/schemas/runtime-profiles.schema.json` | 是 | 字段、类型和边界校验 |
 | 派生 Profile | `profiles/latency.env`、`profiles/throughput.env` | 是 | `stack config` 可重建的 Compose 输入 |
-| 容器模板 | `compose.yaml` | 是 | 镜像 digest、loopback 端口、挂载和安全项 |
+| 容器模板 | `compose.yaml` | 是 | 镜像 digest、loopback 端口、挂载、安全项和固定 `restart: no` |
 | 当前模型选择 | `profiles/deployment.local.env` | 否 | `select/deploy` 生成的本机私有文件，必须 `0600` |
 | Operations 凭据 | `profiles/operations.secrets.env` | 否 | 短生命周期 Collector 使用，不得交给 Dashboard |
 | 备份配置 | `profiles/backup.local.env` | 否 | ModelPort checkout 和备份目录，可能含敏感信息 |
@@ -95,6 +95,10 @@ uv 的常见用户级位置是：
 ./scripts/install-user-services.py --runtime-only --enable
 systemctl --user status qwen-model-runtime.service
 ```
+
+Compose 不接受 runtime restart-policy 环境覆盖；Docker 自动重启保持关闭，systemd user
+supervisor 是唯一的长期生命周期 owner。它可以自行创建 standalone 所需的共享网络，ModelPort
+服务、Dashboard 和 operations units 都不是启动直接 llama.cpp API 的前置条件。
 
 WSL 中的 supervisor 不会启动 Windows 或 Docker Desktop。Docker 后端未就绪时，它会保持运行并
 定期重试，而不是绕过容量和完整性门禁。若要在无交互登录时保留 user manager，还需主机

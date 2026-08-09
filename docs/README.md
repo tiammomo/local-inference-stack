@@ -29,6 +29,7 @@
 - [项目路线图](ROADMAP.md)：各 Phase 当前状态、依赖和剩余工作。
 - [学习与实践指南](LEARNING_GUIDE.md)：从模型制品到验收、运维和控制面的完整背景。
 - [ADR-0001](decisions/0001-trusted-single-host-appliance.md)：可信单机 appliance 的设计决策。
+- [ADR-0002](decisions/0002-long-term-appliance-simplification.md)：长期核心、兼容终止与分阶段精简决策。
 
 `README.md` 提供最短路径，本页提供角色导航，`REFERENCE.md` 只记录机器契约；高级诊断脚本
 保留在 `scripts/`，但新的稳定用户流程应优先使用 `./stack`。

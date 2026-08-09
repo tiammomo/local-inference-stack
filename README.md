@@ -3,12 +3,15 @@
 面向 Linux/WSL NVIDIA 单机的本地 LLM 推理栈：硬件评估、Catalog 选型、可校验
 GGUF 下载、llama.cpp CUDA 运行、验收、发布和运维。模型权重不进入 Git。
 
-当前唯一实机验证档位是 RTX 5070 Ti 16GB、Qwen3.5-9B Q5_K_M、128K 单 Slot、
-Q8_0 KV。其他 Catalog 条目是保守估算，必须在目标主机重新验收。
+当前可执行 Catalog 只保留 RTX 5070 Ti 16GB、Qwen3.5-9B Q5_K_M、128K 单 Slot、
+Q8_0 KV 这一条历史实机档案。它仍为 `provisional`，等待当前 qualification；没有实机
+证据的估算模型已移出可执行 Catalog。现阶段 planner 不会生成下载、选择或启动命令，已有
+健康实例不受此冻结影响。
 
 ## 快速开始
 
-要求：Linux/WSL x86_64、NVIDIA GPU/驱动、NVIDIA Container Toolkit、
+只读诊断可运行于 Linux/WSL x86_64 NVIDIA 主机；自动新部署当前只接受 Tier-1 WSL2 /
+RTX 5070 Ti 精确档案。其余要求：NVIDIA GPU/驱动、NVIDIA Container Toolkit、
 Docker Compose v2、uv、Python 3.11+、`curl` 和 util-linux `flock`。仓库的已验证开发与
 用户服务基线由 `.python-version` 固定为 uv-managed CPython 3.14.6；最低兼容门槛仍是 3.11。
 ModelPort `standard/full` 是可选联合验收，并固定使用 `.nvmrc` 声明的 Linux Node.js 24。
@@ -24,9 +27,12 @@ cd local-inference-stack
 先检查推荐模型、`evidenceStatus`、`hostAcceptanceStatus`、下载大小、固定 revision、
 许可证、SHA256、空闲显存和 `caveats`。然后区分两种情况。
 
+当前 Catalog 处于证据收敛期，即使硬件准入通过，`catalogDeploymentEligible=false` 仍会使
+`readyToDeploy=false`、`actionPlan=null`。这是硬停止条件；不要直接调用旧脚本绕过。
+
 ### 新主机首次部署
 
-只有 `readyToDeploy=true` 且 `nextCommands` 非空，并得到用户明确批准后，
+只有 `readyToDeploy=true` 且存在完整的类型化 `actionPlan`，并得到用户明确批准后，
 才执行：
 
 ```bash
@@ -34,7 +40,8 @@ MODEL_ID=qwen35-9b-q5km # 替换为 plan 返回的 id
 ./stack deploy --model "$MODEL_ID" --yes
 ```
 
-`./stack` 是稳定公共入口；`scripts/` 下的旧命令保留为高级诊断/兼容接口。下载支持断点续传，
+`./stack` 是稳定公共入口；`scripts/` 下的命令只在本文或运维 Runbook 明确列出时作为
+高级诊断/兼容入口。下载支持断点续传，
 只有精确字节数和 SHA256 匹配才会发布。部署会重新执行主机准入，并由文件锁和持久事务双重
 串行化；`quick` 验证权重、实际容器配置、生成和思考，并生成与本机及当前有效配置绑定的限时
 schema v4 验收凭证。
@@ -50,7 +57,8 @@ curl --noproxy '*' http://127.0.0.1:18080/health
 ```
 
 若 `runtimeHealthy=true`、健康接口返回 `{"status":"ok"}`，项目已经在运行。此时 plan 中
-的低空闲显存是容量占用证据，只阻止新的部署动作。需要重新确认当前主机证据时运行：
+的低空闲显存是容量占用证据，只阻止新的部署动作。需要单独重新确认当前主机 quick
+证据时，才运行：
 
 ```bash
 ./scripts/acceptance-suite.sh quick
@@ -76,8 +84,10 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 
 ```bash
 ./stack status
+./stack status --scope integrated
 ./stack doctor
 ./stack verify --scope config
+./stack verify --scope standalone
 ./stack storage report
 ./stack credentials audit
 ./scripts/runtime.sh logs
@@ -96,6 +106,7 @@ curl --noproxy '*' http://127.0.0.1:18080/v1/chat/completions \
 - [升级与回滚](docs/UPGRADING.md)
 - [项目优化路线图](docs/ROADMAP.md)
 - [架构决策：可信单机 Appliance](docs/decisions/0001-trusted-single-host-appliance.md)
+- [架构决策：长期收口与兼容终止](docs/decisions/0002-long-term-appliance-simplification.md)
 - [首次部署](docs/GETTING_STARTED.md)
 - [硬件与模型](docs/HARDWARE_GUIDE.md)
 - [架构与边界](docs/ARCHITECTURE.md)

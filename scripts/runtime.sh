@@ -25,6 +25,25 @@ is_running() {
     2>/dev/null | grep -qx true
 }
 
+probe_runtime_health() {
+  curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
+    http://127.0.0.1:18080/health \
+    | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"runtime health endpoint returned invalid JSON: {error}") from None
+if not isinstance(payload, dict):
+    raise SystemExit("runtime health endpoint must return a JSON object")
+if payload.get("status") != "ok":
+    raise SystemExit("runtime health endpoint did not return status=ok")
+print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+'
+}
+
 wait_healthy() {
   local attempts="${QWEN_START_ATTEMPTS:-180}"
   local interval="${QWEN_START_INTERVAL_SECONDS:-2}"
@@ -38,8 +57,7 @@ wait_healthy() {
   }
   local attempt
   for attempt in $(seq 1 "$attempts"); do
-    if curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
-      http://127.0.0.1:18080/health >/dev/null 2>&1; then
+    if probe_runtime_health >/dev/null 2>&1; then
       printf 'Qwen runtime is healthy at http://127.0.0.1:18080.\n'
       return 0
     fi
@@ -61,10 +79,12 @@ apply_profile() {
     printf 'Available profiles: latency, throughput\n' >&2
     exit 2
   fi
-  "$ROOT_DIR/scripts/verify-models.sh" --active --cached
+  "$ROOT_DIR/stack" config check --json >/dev/null
+  "$ROOT_DIR/scripts/model-manager.py" verify --cached
   if ! is_running; then
     "$ROOT_DIR/scripts/model-manager.py" admit \
-      --model "$QWEN_CATALOG_ID"
+      --model "$QWEN_CATALOG_ID" \
+      --existing-selection
   fi
   if ! docker network inspect "$MODELPORT_NETWORK_NAME" >/dev/null 2>&1; then
     docker network create "$MODELPORT_NETWORK_NAME" >/dev/null
@@ -96,8 +116,7 @@ assert_profile() {
       return 2
       ;;
   esac
-  curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
-    http://127.0.0.1:18080/health >/dev/null
+  probe_runtime_health >/dev/null
   curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
     http://127.0.0.1:18080/slots \
     | python3 -c '
@@ -130,7 +149,9 @@ cd "$ROOT_DIR"
 case "$ACTION" in
   start)
     acquire_runtime_lock "$ROOT_DIR"
+    assert_approved_catalog_spec "$ROOT_DIR" true
     apply_profile "$PROFILE" false
+    assert_approved_catalog_spec "$ROOT_DIR" true
     ;;
   profile)
     acquire_runtime_lock "$ROOT_DIR"
@@ -142,15 +163,14 @@ case "$ACTION" in
     ;;
   restart)
     acquire_runtime_lock "$ROOT_DIR"
-    "$ROOT_DIR/scripts/verify-models.sh" --active --cached
+    "$ROOT_DIR/scripts/model-manager.py" verify --cached
     compose restart qwen35
     wait_healthy
     ;;
   status)
     status=0
     compose ps
-    curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
-      http://127.0.0.1:18080/health || status=1
+    probe_runtime_health || status=1
     printf '\n'
     curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
       http://127.0.0.1:18080/slots \

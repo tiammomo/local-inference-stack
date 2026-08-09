@@ -67,8 +67,11 @@ MODELPORT_PROJECT_DIR=/path/to/ModelPort \
   ./scripts/acceptance-suite.sh standard
 ```
 
-模型、量化、KV、上下文、镜像或性能基线变化运行 `full`。更新 deployment manifest 前先完成对应
-实机验收，再更新经过评审的 SHA256，最后运行 `python3 scripts/verify-manifest.py --json`。
+模型、量化、KV、上下文、镜像或性能基线变化运行 `full`。性能策略尚为 `pending-baseline` 时，先用
+显式批准的 `stack calibrate run --yes` 完成至少三轮 non-promotable 采集；不要猜阈值。
+deployment manifest 的 `repositoryConfiguration` 可以在静态检查后刷新，但
+`validatedConfiguration`、`validation.status` 和 Catalog 资格只有在对应实机验收与受信签名完成后
+才能更新。最后运行 `python3 scripts/verify-manifest.py --json`。
 
 ## 提交前
 

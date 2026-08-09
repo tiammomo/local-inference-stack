@@ -64,19 +64,26 @@ MODELPORT_PROJECT_DIR=/path/to/ModelPort \
 
 ## 4. schema、生成文件和 manifest
 
-本地 schema 只读兼容 N-1，不允许静默迁移。先运行 `stack migrate --check`，再评审 reader、validator、
-migration check 和 writer 的顺序。修改权威运行配置后，用 `stack config render --write --yes` 更新派生文件。
+兼容范围按 schema 单独声明，不笼统承诺 N-1。runtime Profile 与 transaction 当前为 v2，v1
+只读保留；旧 `failed` transaction 必须先分类当前 runtime，不能自动改写为安全终态。bundle 当前
+为 v2：v1 的纯制品 bundle 可只读验证/导入，带未绑定镜像 archive 的 v1 bundle 必须用当前工具重建；
+attestation v1 因缺少当前信任与输入绑定而拒绝读取。先运行 `stack migrate --check` 并审阅报告；
+该命令只审计、不写迁移。v1 transaction 的现场处理入口是经批准的 `stack reconcile --yes`；修改
+权威运行配置后，才用 `stack config render --write --yes` 更新派生文件。
 
-deployment manifest 跟踪关键配置和验证脚本的 SHA256。只有在变化经过评审与对应验收后，才更新其
-digest；随后运行：
+deployment manifest 把两类哈希分开：`validatedConfiguration` 永久保留上次实机验收时的历史输入，
+`repositoryConfiguration` 跟踪当前提交的静态文件。代码变化后可以机械刷新后者，但这绝不改变
+`validation.status`、Catalog 资格或历史证据；只有完成对应实机验收和受信签名后，才能建立新的
+validated 集合并晋级。随后运行：
 
 ```bash
 python3 scripts/verify-manifest.py --json
-python3 scripts/verify-deployment.py
+./stack verify --scope all --json
 ```
 
-`verify-deployment.py` 需要清单声明的 runtime、ModelPort 和 operations 服务均存在；仅 standalone
-运行时使用 quick 与 manifest 文件哈希检查，不伪造缺失的联合运维状态。
+`--scope standalone` 不要求 ModelPort，但会验证实际容器完整安全信封、活动制品和控制事务；
+`integrated`/`all` 才要求清单声明的
+ModelPort、operations、备份与联合身份，不把“未配置”和 daemon/user-bus 故障混为一谈。
 
 ## 5. 回滚
 

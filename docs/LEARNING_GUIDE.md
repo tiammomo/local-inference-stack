@@ -10,7 +10,7 @@
 - 使用直接 llama.cpp API，或通过 ModelPort 接入应用；
 - 完成日常检查、故障恢复、候选发布和仓库变更验证。
 
-> 本文中的下载、选择、启动、停止和发布命令都会改变主机状态。第一次接触项目时只运行只读的 `plan --json`。当 `readyToDeploy=false` 或 `nextCommands` 为空时，必须停止新部署，不能绕过门禁；已有健康 runtime 是否正常应另行通过 `stack status` 判断。
+> 本文中的下载、选择、启动、停止和发布命令都会改变主机状态。第一次接触项目时只运行只读的 `./stack plan --json`。当 `readyToDeploy=false` 或 `actionPlan=null` 时，必须停止新部署，不能绕过门禁；已有健康 runtime 是否正常应另行通过 `./stack status` 判断。
 
 ## 1. 项目解决什么问题
 
@@ -67,7 +67,8 @@
 - 许可证元数据；
 - 最低与建议 VRAM、最低 RAM 和磁盘；
 - 上下文、输出、Batch 和缓存参数；
-- `estimated` 或 `validated` 证据状态。
+- `estimated`、`provisional` 或 `validated` 证据状态，以及与证据状态正交的
+  `lifecycleRole`（`lts`、`rollback`、`candidate`）。
 
 Catalog 中有条目，不代表它已经在你的主机上通过验收。哈希只证明下载到的制品身份一致，也不等于发布者可信或许可证适用。
 
@@ -108,10 +109,17 @@ GPU 显存大致由以下部分共同消耗：
 | 术语 | 含义 |
 | --- | --- |
 | `estimated` | Catalog 中的保守估算，必须在目标主机重新验收 |
+| `provisional` | 有历史实机资料但不满足当前新部署/晋级门禁 |
 | `validated-hardware-profile-match` | 当前硬件类似已有验证档案，但还不是本机验收 |
 | `validated-on-this-host` | 新鲜的 schema v4 证据与当前主机、制品、镜像、有效 Compose 和实际容器配置全部匹配 |
 
 schema v4 证据还绑定验收模式和 `latency` Profile。旧证据、配置漂移、容器重建后的身份变化、驱动变化、权限放宽或超过有效期，都会使它失效。
+
+当前可执行 Catalog 只保留 legacy/provisional 9B 条目；未经实机验证的估算模型已退出部署
+allowlist。在当前门禁重新完成前，planner 不会给出写入命令。
+
+`lifecycleRole` 表示生命周期槽位，不是验收结论：当前条目占用 `lts` 槽以保持默认身份，
+但其 `provisional` 状态和 `automatic=false` 意味着它尚未成为 production-qualified LTS。
 
 ## 4. 仓库地图
 
@@ -166,7 +174,7 @@ schema v4 证据还绑定验收模式和 `latency` Profile。旧证据、配置�
 - 总 RAM 与当前可用 RAM；
 - Docker、Compose 配置兼容性、Python、`curl`、`flock`；
 - `caveats`；
-- `readyToDeploy` 和 `nextCommands`。
+- `readyToDeploy` 和类型化 `actionPlan`；展示文本不是变更 authority。
 
 容量覆盖参数只用于模拟推荐边界：
 
@@ -178,11 +186,10 @@ schema v4 证据还绑定验收模式和 `latency` Profile。旧证据、配置�
 
 ### 5.3 单独执行准入
 
-部署脚本在改变状态前会再次执行准入，也可以手动只读检查：
+部署入口在改变状态前会再次执行准入，也可以手动只读检查指定模型：
 
 ```bash
-./scripts/model-manager.py admit --model qwen35-9b-q5km --json
-echo "$?"  # 0=允许；3=门禁阻止
+./stack plan --model qwen35-9b-q5km --json
 ```
 
 常见阻止原因包括：
@@ -198,7 +205,7 @@ echo "$?"  # 0=允许；3=门禁阻止
 
 ## 6. 获得批准后的部署流程
 
-仅当计划返回 `readyToDeploy=true`、`nextCommands` 非空，而且使用者明确批准状态变更后执行：
+仅当计划返回 `readyToDeploy=true`、完整 `actionPlan`，而且使用者明确批准状态变更后执行：
 
 ```bash
 MODEL_ID=qwen35-9b-q5km  # 必须替换为 plan 实际返回的 Catalog ID
@@ -423,7 +430,7 @@ MODELPORT_PROJECT_DIR=/path/to/ModelPort \
 ```bash
 ./scripts/release-check.sh --with-runtime
 ./scripts/model-manager.py audit-sources --json
-python3 scripts/verify-deployment.py
+./stack verify --scope standalone --json
 ```
 
 `audit-sources` 会联网核对固定 revision 和 Hugging Face LFS 身份；它仍不替代许可证和发布者信任审查。
@@ -515,7 +522,7 @@ curl --noproxy '*' http://127.0.0.1:33004/api/health
 2. 找出推荐模型、下载大小和 SHA256；
 3. 解释 `fits`、`resourceAvailableNow` 和 `readyToDeploy` 的区别；
 4. 找出阻止部署的每条 caveat；
-5. 不执行 `nextCommands`。
+5. 不把 `actionPlan` 或任何展示文本当作可手工执行的 Shell 命令。
 
 ### 实验 B：阅读配置，不启动
 
@@ -544,6 +551,8 @@ python3 scripts/verify-manifest.py --json
 ```
 
 修改一个被 manifest 跟踪的文件，观察门禁失败；恢复或更新经过评审的 manifest 后再验证。
+当前 integrated identity 仍为 `review-required`，所以 standalone 静态/运行验证可通过时，联合验证
+仍会 fail closed；只有在干净的 ModelPort checkout 上记录完整且不泄密的容器身份后才能解除。
 
 ## 14. 术语表
 
@@ -590,7 +599,7 @@ python3 scripts/verify-manifest.py --json
 ./stack plan --json                 # 硬件、推荐、来源、许可证和下一步
 ./stack doctor --json               # 平台、依赖、配置漂移、待恢复事务
 ./stack config check --json         # 类型化配置与派生 Profile/Compose/Dashboard
-./stack migrate --check --json      # schema 当前版本与 N-1 兼容情况
+./stack migrate --check --json      # 各 schema 当前版本与显式可读集合
 ./stack storage report --json       # models/cache/logs/backups 占用与保护引用
 ./stack credentials audit --json    # 只读权限元数据；永不读取凭据值
 ./stack bundle verify FILE --json   # 离线校验 bundle 全部成员、大小与哈希
@@ -609,13 +618,16 @@ python3 scripts/verify-manifest.py --json
 ./stack calibrate run --yes
 ```
 
-离线 bundle 导入只会原子写入与本地 Catalog 身份完全一致的制品，不会选择模型或启动服务；
-导入后必须重新运行当前主机准入。`calibrate` 只生成候选对比报告，不会在线调整生产参数。
+离线 bundle v2 会把 Docker save archive 绑定到 Catalog 固定的 RepoDigest、image config 和 layer
+DiffID；导入只会原子写入与本地 Catalog 身份完全一致的制品，不会加载镜像、选择模型或启动服务。
+旧 v1 纯制品 bundle 仍可只读兼容；含未绑定镜像的 v1 bundle 必须重建。导入后必须重新运行当前
+主机准入。`calibrate` 只生成候选对比报告，不会在线调整生产参数。
 `storage gc` 默认 dry-run，且只处理过期的 `.part`/`.tmp`。
 
-可复用验证与本机 acceptance 是两层证据。创建 attestation 时会绑定 acceptance、Git revision、
-配置身份和平台；dirty tree 只能得到草稿。正式证明必须使用 Minisign 或 Cosign 的分离签名并
-执行外部密码学验证，自哈希 JSON 不能提升 Catalog：
+可复用验证与本机 acceptance 是两层证据。attestation schema v2 只接受 runner 产生的完整、有序
+schema v4 full 记录，并绑定制品、完整容器安全信封、控制面 package 和 manifest 性能策略；dirty
+tree 只能得到草稿。正式证明必须使用 Minisign 或 Cosign 的分离签名。密码学有效与可晋级是两个
+不同结论，自哈希 JSON 或调用者任意提供的公钥都不能提升 Catalog：
 
 ```bash
 ./stack attest create --evidence logs/acceptance/FILE.json --output validation.json
@@ -623,9 +635,18 @@ python3 scripts/verify-manifest.py --json
   --signature validation.minisig --yes
 ./stack attest verify validation.json --require-signature --tool minisign \
   --public-key KEY.pub --signature validation.minisig
+TRUSTED_KEY_SHA256=REVIEWED_64_HEX_FINGERPRINT
+./stack attest verify validation.json --for-promotion --tool minisign \
+  --public-key KEY.pub --signature validation.minisig \
+  --trusted-key-sha256 "$TRUSTED_KEY_SHA256"
 ```
 
+Catalog 实时准入还要求运维环境显式提供绝对公钥路径
+`LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY` 和外部审阅的
+`LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY_SHA256`；Catalog 中的静态布尔值没有授权力。
+
 发生中断时不要先运行新的变更命令。持久事务位于 Git 忽略的
-`cache/control-plane/transaction.json`，记录原 Profile、目标、状态、历史和下一恢复动作；
-新部署、Profile 切换和候选发布都会先拒绝未完成事务。查看并批准 `reconcile` 后，控制面调用
-加固的恢复脚本，健康与身份确认成功后才将事务标记为完成。
+`cache/control-plane/transaction.json`，记录原 Profile、目标、状态、历史、发起 PID/boot 身份和
+下一恢复动作；新部署、Profile 切换和候选发布都会先拒绝未完成事务。活着的发起者不能被抢占；
+只有能证明进程已退出、boot 已变化或 PID 已复用时，显式 `reconcile --yes` 才会先 fence 为
+`recovery_required`。恢复脚本验证原身份后才闭合事务。

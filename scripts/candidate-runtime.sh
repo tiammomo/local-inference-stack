@@ -57,7 +57,7 @@ case "$ACTION" in
       exit 2
     fi
     "$ROOT_DIR/scripts/model-manager.py" admit --model "$QWEN_CATALOG_ID"
-    "$ROOT_DIR/scripts/verify-models.sh" --active --cached
+    "$ROOT_DIR/scripts/model-manager.py" verify --cached
     docker network inspect "${MODELPORT_NETWORK_NAME:-modelport_default}" >/dev/null
     mkdir -p "$ROOT_DIR/cache/candidate/slots"
     chmod 700 "$ROOT_DIR/cache/candidate" "$ROOT_DIR/cache/candidate/slots"

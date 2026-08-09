@@ -54,6 +54,61 @@ class OperationsReportTests(unittest.TestCase):
         self.assertEqual(parsed.microsecond, 52_738)
         self.assertEqual(parsed.utcoffset().total_seconds(), 0)
 
+    def test_soak_gate_accepts_the_public_verify_command_result(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "command": "verify",
+                    "status": "ok",
+                    "code": 0,
+                    "summary": "all deployment components verified",
+                    "facts": {},
+                    "nextActions": [],
+                }
+            ),
+            stderr="",
+        )
+        passed, summary = soak_check.deployment_verification_result(completed)
+        self.assertTrue(passed)
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["code"], 0)
+
+    def test_soak_gate_rejects_a_failed_public_verify_result(self) -> None:
+        completed = SimpleNamespace(
+            returncode=7,
+            stdout=json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "command": "verify",
+                    "status": "error",
+                    "code": 7,
+                }
+            ),
+            stderr="control plane attention",
+        )
+        passed, summary = soak_check.deployment_verification_result(completed)
+        self.assertFalse(passed)
+        self.assertEqual(summary["status"], "error")
+        self.assertEqual(summary["code"], 7)
+
+    def test_soak_gate_rejects_the_removed_verifier_result_shape(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "status": "passed",
+                    "summary": {"passed": 10, "failed": 0},
+                }
+            ),
+            stderr="",
+        )
+        passed, summary = soak_check.deployment_verification_result(completed)
+        self.assertFalse(passed)
+        self.assertEqual(summary, "invalid CommandResult")
+
     def test_backup_snapshot_reports_age_and_restrictive_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             backup_dir = Path(directory)

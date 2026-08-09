@@ -42,12 +42,14 @@ uv python find "$PYTHON_VERSION"
 - 推荐模型、Catalog 状态与许可证；
 - 固定的模型/GGUF revision、字节数和 SHA256；
 - `evidenceStatus` 与 `hostAcceptanceStatus`；
+- `catalogDeploymentEligible` 与 `hostAdmissionPassed`，二者不可互相替代；
 - VRAM/RAM/磁盘、当前空闲显存和 `caveats`；
-- `readyToDeploy` 与 `nextCommands`。
+- `readyToDeploy` 与类型化 `actionPlan`。
 
-`recommendation=null`、`readyToDeploy=false` 或空 `nextCommands` 都是停止条件。容量覆盖参数
-只用于模拟，永远不会授权部署。也可以用
-`./scripts/model-manager.py admit --model <catalog-id> --json` 单独重复只读准入。硬件档位
+`recommendation=null`、`catalogDeploymentEligible=false`、`readyToDeploy=false` 或
+`actionPlan=null` 都是停止条件。容量覆盖参数
+只用于模拟，永远不会授权部署。需要指定模型时使用
+`./stack plan --model <catalog-id> --json` 重复只读准入。硬件档位
 相似不等于本机已经验收。
 
 对已部署的主机，还要结合运行状态解释 plan：
@@ -61,13 +63,19 @@ uv python find "$PYTHON_VERSION"
 
 ## 3. 新主机经批准后部署
 
+当前可执行 Catalog 只有一个 legacy/provisional 9B 条目，尚未满足新部署门禁。没有实机证据的
+估算条目不再作为可执行选择。因此当前 plan 会保留该条目的身份和容量信息，但不会生成本节
+命令。只有未来条目重新晋级为 eligible、plan 明确返回 `readyToDeploy=true` 和完整
+`actionPlan` 后，本节才可执行。
+
 ```bash
 MODEL_ID=qwen35-9b-q5km # 替换为 plan 返回的 id
 ./stack deploy --model "$MODEL_ID" --yes
 ./stack status
 ```
 
-`deploy` 只执行规划器返回的 Catalog 命令。下载保留可续传 `.part`；只有精确大小和 SHA256
+`deploy` 只解释经过严格校验且绑定 Catalog spec 摘要的类型化 action，不执行规划器提供的
+Shell 字符串。下载保留可续传 `.part`；只有精确大小和 SHA256
 匹配才会原子发布。`select` 只接受已校验的必需制品，并写入 Git 忽略、权限 `0600` 的本地
 Profile。运行变更由 `flock` 和持久事务串行化，启动必须
 等待健康。`quick` 通过后生成 schema v4 本机验收凭证；主机、驱动、制品、镜像、有效 Compose、
@@ -85,11 +93,13 @@ Profile。运行变更由 `flock` 和持久事务串行化，启动必须
 curl --noproxy '*' http://127.0.0.1:18080/health
 ```
 
-`runtimeHealthy=true` 且健康接口返回 `{"status":"ok"}` 时，启动已完成。`status` 中的终态
-`failed` 事务可能是历史审计记录；是否需恢复以 `doctor` 的 `reconciliationRequired`
-为准，不要仅因历史记录重建容器。
+`runtimeHealthy=true` 且健康接口返回 `{"status":"ok"}` 时，runtime 已在服务；控制面仍可能要求
+单独审阅事务。schema v2 只有 `completed`、`failed-restored` 和 `superseded-verified` 是已验证终态；
+旧 schema v1 的 `failed` 不是安全终态，`doctor`/`reconcile` 会把它标为 review-required。
+先查看只读恢复计划，不要仅凭健康接口猜测恢复完成，也不要擅自重建容器。
 
-需要为当前宿主机/配置重新产生验收证据时，运行：
+`stack deploy` 成功路径已经包含 quick。只有需要为现有宿主机/配置单独重新产生 quick
+证据时，才运行：
 
 ```bash
 ./scripts/acceptance-suite.sh quick
@@ -112,7 +122,9 @@ uv python install "$(cat .python-version)"
 runtime-only 安装会收敛并禁用之前遗留的 Dashboard、报表、备份和恢复演练 unit，但不会
 删除其日志或备份数据。常驻 supervisor 在 Docker 后端暂不可用时每 60 秒重试，10 分钟后
 写入本地私有告警并继续等待；运行成功后每 5 分钟校验健康、固定 Profile 和容器身份。
-显存准入、模型哈希或配置漂移失败不会被自动绕过。
+Compose 的 Docker restart policy 固定为 `no`；systemd user supervisor 是唯一的自动恢复
+owner。显存准入、模型哈希或配置漂移失败不会被自动绕过。已有旧容器必须在另行批准的维护
+窗口受控 recreate 才会取得该策略，安装 unit 本身不能冒充迁移完成。
 
 WSL 重启后 Docker Desktop 可能比 systemd user manager 更晚就绪；supervisor 初始出现等待日志属于
 正常恢复路径。精确的 WSL Interop、Docker credential helper、linger 和健康复核步骤见

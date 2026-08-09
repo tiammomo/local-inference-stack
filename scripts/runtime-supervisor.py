@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import subprocess
 import sys
@@ -25,6 +26,15 @@ except ModuleNotFoundError:  # Direct execution from scripts/.
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT_DIR / "src"))
+
+from local_inference_stack.paths import ProjectPaths  # noqa: E402
+from local_inference_stack.transactions import (  # noqa: E402
+    TransactionStore,
+    open_private_lock,
+    recovery_original_is_safe,
+)
+
 RUNTIME_UNIT = "qwen-model-runtime.service"
 PERMANENT_FAILURE_EXIT = 78
 
@@ -34,6 +44,8 @@ class Step(Enum):
     RECOVERED = "recovered"
     WAIT_DOCKER = "wait-docker"
     WAIT_STARTING = "wait-starting"
+    WAIT_TRANSACTION = "wait-transaction"
+    WAIT_LOCK = "wait-lock"
     PERMANENT_FAILURE = "permanent-failure"
 
 
@@ -166,6 +178,41 @@ class RuntimeSupervisor:
             return False
         return result.returncode == 0
 
+    def reconcile_transaction(self) -> bool:
+        try:
+            result = self._run(
+                [str(self.root_dir / "stack"), "reconcile", "--yes", "--json"],
+                timeout=self.reconcile_timeout_seconds,
+                capture=True,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    def transaction_plan(self) -> dict[str, object]:
+        try:
+            return TransactionStore(ProjectPaths(self.root_dir)).reconciliation_plan()
+        except Exception as error:
+            raise RuntimeError(f"cannot inspect the control transaction: {error}") from error
+
+    def runtime_lock_active(self) -> bool:
+        path = self.root_dir / "cache" / "locks" / "runtime.lock"
+        if not path.exists() and not path.is_symlink():
+            return False
+        try:
+            descriptor = open_private_lock(path)
+        except Exception as error:
+            raise RuntimeError(f"cannot safely inspect the runtime lock: {error}") from error
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
     def _alert(self, action: str) -> bool:
         try:
             result = self._run(
@@ -218,6 +265,54 @@ class RuntimeSupervisor:
             raise RuntimeError("failed to clear the runtime alert")
 
     def step(self) -> Step:
+        transaction = self.transaction_plan()
+        if transaction.get("required"):
+            document = transaction.get("transaction")
+            state = document.get("state") if isinstance(document, dict) else None
+            original = document.get("original") if isinstance(document, dict) else None
+            eligible = bool(
+                transaction.get("classification") == "recovery-required"
+                and transaction.get("automaticEligible") is True
+                and recovery_original_is_safe(original)
+            )
+            if not eligible:
+                print(
+                    f"Control transaction state {state!r} requires review; "
+                    "the supervisor will wait without mutating runtime.",
+                    flush=True,
+                )
+                return Step.WAIT_TRANSACTION
+            if self.runtime_lock_active():
+                print(
+                    "Runtime mutation lock is busy; waiting before transaction recovery.",
+                    flush=True,
+                )
+                return Step.WAIT_LOCK
+            if not self.docker_available():
+                self.note_docker_wait()
+                return Step.WAIT_DOCKER
+            print(
+                "A safe recovery_required transaction was found; running controlled reconciliation.",
+                flush=True,
+            )
+            if not self.reconcile_transaction():
+                if self.runtime_lock_active():
+                    return Step.WAIT_LOCK
+                if not self.docker_available():
+                    self.note_docker_wait()
+                    return Step.WAIT_DOCKER
+                print(
+                    "Transaction reconciliation failed with Docker available; "
+                    "manual review is required.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return Step.PERMANENT_FAILURE
+            return Step.RECOVERED
+
+        if self.runtime_lock_active():
+            print("Runtime mutation lock is busy; waiting.", flush=True)
+            return Step.WAIT_LOCK
         if not self.docker_available():
             self.note_docker_wait()
             return Step.WAIT_DOCKER
@@ -241,6 +336,11 @@ class RuntimeSupervisor:
 
         print("Runtime is unhealthy; attempting one controlled reconciliation.", flush=True)
         if not self.reconcile():
+            current_transaction = self.transaction_plan()
+            if current_transaction.get("required"):
+                return Step.WAIT_TRANSACTION
+            if self.runtime_lock_active():
+                return Step.WAIT_LOCK
             if not self.docker_available():
                 self.note_docker_wait()
                 return Step.WAIT_DOCKER
@@ -274,7 +374,11 @@ class RuntimeSupervisor:
                 return 0 if step in {Step.HEALTHY, Step.RECOVERED} else 75
             if step is Step.WAIT_DOCKER:
                 delay = self.docker_retry_seconds
-            elif step is Step.WAIT_STARTING:
+            elif step in {
+                Step.WAIT_STARTING,
+                Step.WAIT_TRANSACTION,
+                Step.WAIT_LOCK,
+            }:
                 delay = self.start_poll_seconds
             else:
                 delay = self.health_seconds
