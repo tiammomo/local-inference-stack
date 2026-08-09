@@ -11,7 +11,8 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 2. Run `./stack plan --json`. The current implementation may use internal
    compatibility adapters, but those are not public entry points. This is the only default first-run
    command: it is read-only and reports detected hardware,
-   prerequisites, recommendation status, size, and next commands.
+   prerequisites, recommendation status, size, and a typed action plan when
+   deployment admission succeeds.
 3. Show the user the selected model, `evidenceStatus`, `hostAcceptanceStatus`,
    download size, immutable source revision, license metadata, SHA256 policy,
    context, current free VRAM, and caveats. Do not download, select, start, stop,

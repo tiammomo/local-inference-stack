@@ -954,12 +954,12 @@ def admission_payload(
         selection_matches = bool(
             selected
             and selected["id"] == model_id
-            and selection_mode != "mismatch"
+            and selection_mode == "exact-current-projection"
         )
         recovery_hardware_match = matches_recorded_hardware_profile(model, host)
+        recovery_resources_available = resources_available_now(model, host)
         recovery_host_admitted = bool(
             fits(model, host)
-            and resources_available_now(model, host)
             and automatic_deployment_supported(host)
             and host["docker"]["available"]
             and host["dockerCompose"]["available"]
@@ -972,14 +972,30 @@ def admission_payload(
         )
         payload["mode"] = "read-only-existing-selection-admission"
         payload["selectedConfigurationMatchesCatalog"] = selection_matches
-        payload["selectedConfigurationMode"] = (
-            selection_mode if selection_matches else "mismatch"
-        )
+        payload["selectedConfigurationMode"] = selection_mode
         payload["recoveryHardwareProfileMatch"] = recovery_hardware_match
+        payload["recoveryResourcesAvailableNow"] = recovery_resources_available
         payload["recoveryHostAdmissionPassed"] = recovery_host_admitted
         payload["readyToStartExisting"] = bool(
             selection_matches and recovery_host_admitted
         )
+        if (
+            selected
+            and selected["id"] == model_id
+            and selection_mode == "legacy-compatible-current-defaults"
+        ):
+            payload["caveats"].append(
+                "The selected private profile is a recognized legacy migration "
+                "source, not runtime start authority. Run ./stack migrate --yes "
+                "to fully verify the artifact and normalize the profile first."
+            )
+        if payload["readyToStartExisting"] and not recovery_resources_available:
+            payload["caveats"].append(
+                "Current free VRAM or RAM is below the new-deployment threshold. "
+                "Existing-selection recovery may still attempt this exact previously "
+                "selected artifact and host profile, but runtime health remains a hard "
+                "post-start requirement; this does not authorize a new deployment."
+            )
         if payload["readyToStartExisting"]:
             payload["caveats"].append(
                 "Recovery is authorized only for the already selected private "

@@ -236,11 +236,11 @@
 
 ### `./stack migrate`
 
-按各 schema 的显式可读集合检查兼容性，只报告、不静默改写。
+按显式可读集合检查 schema；兼容的旧 selected profile 只在制品全量验证后原子归一，不静默改写。
 
-- 状态：只读。
-- 批准：不需要。
-- 语法：`./stack migrate [--check] [--json]`
+- 状态：默认/--check 只读；--yes 仅写入已验证的兼容本机迁移。
+- 批准：写入时必须 --yes。
+- 语法：`./stack migrate [--check | --yes] [--json]`
 - 示例：`./stack migrate --check --json`
 
 ### `./stack reference`

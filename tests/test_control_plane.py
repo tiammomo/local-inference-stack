@@ -138,6 +138,23 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "not a compatible migration source"):
                 configuration.normalize_selected_deployment_profile(paths)
 
+    def test_selected_profile_migration_rejects_unreviewed_field_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = write_legacy_selected_profile(Path(directory))
+            profile = paths.root / "profiles" / "deployment.local.env"
+            body = "\n".join(
+                line
+                for line in profile.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("QWEN_MODEL_DISPLAY_NAME=")
+            )
+            profile.write_text(body + "\n", encoding="utf-8")
+            profile.chmod(0o600)
+            status = configuration.selected_deployment_profile_status(paths)
+            self.assertEqual(status["status"], "mismatch")
+            self.assertFalse(status["migrationRequired"])
+            with self.assertRaisesRegex(ConfigError, "not a compatible migration source"):
+                configuration.normalize_selected_deployment_profile(paths)
+
     def test_dashboard_render_rejects_an_invalid_catalog_without_echoing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -584,6 +601,12 @@ class TransactionTests(unittest.TestCase):
             )
             self.assertEqual(resolved["schemaVersion"], 2)
             self.assertEqual(resolved["state"], "superseded-verified")
+            self.assertEqual(
+                json.loads(
+                    store.archive_path(legacy["id"]).read_text(encoding="utf-8")
+                ),
+                resolved,
+            )
 
     def test_transaction_begin_refuses_a_held_runtime_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -708,6 +731,170 @@ TransactionStore(ProjectPaths(Path(sys.argv[2]))).begin("deploy", "model", {})
                 store.transition("deploying", expected_id=first["id"])
             self.assertEqual(store.read()["id"], second["id"])
             self.assertEqual(store.read()["state"], "planned")
+
+    def test_terminal_transactions_are_privately_archived_before_slot_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            store = TransactionStore(paths)
+            first = store.begin("profile", "latency", self.safe_original())
+            store.transition("deploying", expected_id=first["id"])
+            completed = store.transition("completed", expected_id=first["id"])
+            archive = store.archive_path(first["id"])
+
+            self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), completed)
+            self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(archive.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(store.archive_current_terminal(), archive)
+
+            second = store.begin("profile", "throughput", self.safe_original())
+            self.assertEqual(store.read()["id"], second["id"])
+            self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), completed)
+
+    def test_terminal_archive_symlink_is_rejected_without_touching_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            store = TransactionStore(paths)
+            document = store.begin("profile", "latency", self.safe_original())
+            store.transition("deploying", expected_id=document["id"])
+            store.archive_dir.mkdir(mode=0o700)
+            target = paths.root / "archive-victim"
+            target.write_text("unchanged", encoding="utf-8")
+            target.chmod(0o600)
+            store.archive_path(document["id"]).symlink_to(target)
+
+            with self.assertRaisesRegex(RecoveryError, "archive"):
+                store.transition("completed", expected_id=document["id"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+            self.assertEqual(store.read()["state"], "completed")
+
+    def test_terminal_archive_never_overwrites_a_late_competing_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            store = TransactionStore(paths)
+            document = store.begin("profile", "latency", self.safe_original())
+            store.transition("deploying", expected_id=document["id"])
+            competitor = copy.deepcopy(store.read())
+            archive = store.archive_path(document["id"])
+
+            def publish_competitor(*_args: Any, **_kwargs: Any) -> None:
+                archive.write_text(
+                    json.dumps(competitor, sort_keys=True, separators=(",", ":"))
+                    + "\n",
+                    encoding="utf-8",
+                )
+                archive.chmod(0o600)
+                raise FileExistsError(archive)
+
+            with (
+                patch.object(os, "link", side_effect=publish_competitor),
+                self.assertRaisesRegex(RecoveryError, "conflicts"),
+            ):
+                store.transition("completed", expected_id=document["id"])
+
+            self.assertEqual(
+                json.loads(archive.read_text(encoding="utf-8")), competitor
+            )
+            self.assertEqual(store.read()["state"], "completed")
+
+    def test_terminal_archive_publish_is_bound_to_the_verified_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            store = TransactionStore(paths)
+            document = store.begin("profile", "latency", self.safe_original())
+            store.transition("deploying", expected_id=document["id"])
+            outside = paths.root / "outside"
+            outside.mkdir(mode=0o700)
+            moved = paths.state_dir / "transactions-moved"
+            real_link = os.link
+
+            def swap_parent_then_link(*args: Any, **kwargs: Any) -> None:
+                real_link(*args, **kwargs)
+                store.archive_dir.rename(moved)
+                store.archive_dir.symlink_to(outside, target_is_directory=True)
+
+            with (
+                patch.object(os, "link", side_effect=swap_parent_then_link),
+                self.assertRaisesRegex(RecoveryError, "directory changed"),
+            ):
+                store.transition("completed", expected_id=document["id"])
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(store.read()["state"], "completed")
+            archived = moved / store.archive_path(document["id"]).name
+            self.assertTrue(archived.is_file())
+            self.assertEqual(archived.stat().st_mode & 0o777, 0o600)
+
+    def test_terminal_archive_rejects_a_hard_link_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            store = TransactionStore(paths)
+            document = store.begin("profile", "latency", self.safe_original())
+            store.transition("deploying", expected_id=document["id"])
+            store.archive_dir.mkdir(mode=0o700)
+            target = paths.root / "archive-victim"
+            target.write_text("unchanged", encoding="utf-8")
+            target.chmod(0o600)
+            os.link(target, store.archive_path(document["id"]))
+
+            with self.assertRaisesRegex(RecoveryError, "archive"):
+                store.transition("completed", expected_id=document["id"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+            self.assertEqual(target.stat().st_nlink, 2)
+            self.assertEqual(store.read()["state"], "completed")
+
+    def test_terminal_slot_survives_archive_publish_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = TransactionStore(ProjectPaths(Path(directory)))
+            document = store.begin("profile", "latency", self.safe_original())
+            store.transition("deploying", expected_id=document["id"])
+            with (
+                patch.object(
+                    store,
+                    "_archive_terminal",
+                    side_effect=RecoveryError("injected archive failure"),
+                ),
+                self.assertRaisesRegex(RecoveryError, "injected archive failure"),
+            ):
+                store.transition("completed", expected_id=document["id"])
+            self.assertEqual(store.read()["state"], "completed")
+
+    def test_legacy_resolution_slot_survives_archive_publish_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            paths.state_dir.mkdir(parents=True)
+            legacy = {
+                "schemaVersion": 1,
+                "id": "3f60dedc-e85e-4280-89a9-42bdaf4a71ca",
+                "operation": "deploy",
+                "target": "reviewed-model",
+                "state": "failed",
+                "createdAt": "2026-08-01T00:00:00Z",
+                "updatedAt": "2026-08-01T00:01:00Z",
+                "original": self.safe_original(),
+                "history": [
+                    {"state": "planned", "at": "2026-08-01T00:00:00Z"},
+                    {"state": "failed", "at": "2026-08-01T00:01:00Z"},
+                ],
+            }
+            paths.transaction_path.write_text(json.dumps(legacy), encoding="utf-8")
+            paths.transaction_path.chmod(0o600)
+            store = TransactionStore(paths)
+            with (
+                patch.object(
+                    store,
+                    "_archive_terminal",
+                    side_effect=RecoveryError("injected archive failure"),
+                ),
+                self.assertRaisesRegex(RecoveryError, "injected archive failure"),
+            ):
+                store.resolve_legacy_failed(
+                    "superseded-verified",
+                    expected_id=legacy["id"],
+                    detail="healthy runtime preserved",
+                )
+            current = store.read()
+            self.assertEqual(current["schemaVersion"], 2)
+            self.assertEqual(current["state"], "superseded-verified")
 
     def test_healthy_original_requires_complete_runtime_identity(self) -> None:
         original = self.safe_original(healthy=True)

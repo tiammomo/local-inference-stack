@@ -5,18 +5,43 @@
 ADR-0002 为准。它描述依赖顺序和完成定义，不是承诺日期；任何阶段都必须保持现有安全黄金
 路径可用。
 
-截至 2026-08-09，控制面完成了一轮 fail-closed 加固，但当前 9B 档案已降为
-`provisional-legacy`：在线健康实例不等于新部署资格。本轮只修改仓库，没有启停运行时、执行
-qualification、写本机 evidence 或处理持久事务。长期收口的第一阶段只建立 package-native
-权威边界并删除无消费者 wrapper；维护窗口切换和现场重新 qualification 仍未开始。
+截至 2026-08-09，控制面完成了一轮 fail-closed 加固，但当前 9B 档案仍是
+`provisional-legacy`：在线健康实例不等于新部署资格。package-native 权威边界和无消费者
+wrapper 清理已经落地；Tier-1 主机还完成了一个受控的 Phase B owner-migration 切片。维护后
+quick recheck 已通过，但它不是 full host qualification；Catalog 没有晋级，历史验证结论也未重写。
 
 ## ADR-0002 收口阶段
 
 | 阶段 | 当前状态 | 完成定义 |
 | --- | --- | --- |
 | A 旁路重构 | 进行中 | Catalog、material、observation 和 lifecycle 逻辑进入 package；当前 runtime 不变 |
-| B 维护窗口切换 | 代码准备中，现场未开始 | Compose 已固定关闭 Docker 自动重启；仍须处理 v1 事务、受控 recreate、切换中性配置并完成 host qualification |
+| B 维护窗口切换 | owner migration 已完成，其余进行中 | systemd 已成为唯一自动恢复 owner；仍须交付类型化升级/回滚、完整事务覆盖、持久 rollback spec、真实 reboot 与 host qualification |
 | C 验证后删除 | 未开始 | LTS/回滚/重启验证通过后，删除旧 schema、candidate、operations、bundle 与 attestation 核心路径 |
+
+### Phase B owner-migration 切片
+
+本轮已完成并在当前 Tier-1 主机验证：
+
+- Compose 和实际容器均使用 `restart: no`，Docker 不再拥有自动恢复策略；
+- systemd user supervisor 是唯一的等待、监控和自动恢复 owner；
+- 历史 schema v1 事务已显式解析，本机私有 selection 已按当前结构和权限规范化；
+- “停止 runtime → systemd 恢复 → post-start 健康、Profile 与实际身份检查”演练通过；
+- 维护后 quick recheck 的单测、制品、直接生成和推理最小路径通过，但不产生晋级资格。
+
+existing-selection 恢复时，当前 free VRAM/RAM 会受到已选模型、runtime 和缓存占用影响，因而只作
+advisory；它不能授权新部署，也不能绕过制品和配置身份。恢复后的健康、canonical Profile 与实际
+容器身份始终是硬门槛。
+
+上述结果只关闭了 Phase B 的 lifecycle-owner 风险。下列工作仍是 Phase B 的完成条件：
+
+- 实现真正类型化且 Catalog-backed 的 `stack upgrade` 与 `stack rollback`；
+- 把独立 quick 和完整 qualification 纳入同一持久事务与失败恢复语义；
+- 保存并验证可跨进程/重启恢复的 immutable rollback spec，而不只依赖当前选择；
+- 完成一次真实 WSL shutdown/reboot、Docker 延迟就绪和 systemd 自动恢复验证；
+- 在当前代码与配置上完成 host qualification，并生成可晋级的新证据。
+
+这些条件未全部满足前，Phase C 明确禁止开始：不得删除旧 schema reader、candidate、兼容恢复
+适配器或其他尚承担回滚职责的路径。
 
 下面 Phase 0–7 记录前一轮加固的实现来源和仍需迁移的依赖，不再表示所有能力都会长期留在核心。
 
@@ -25,7 +50,7 @@ qualification、写本机 evidence 或处理持久事务。长期收口的第一
 | 0 基线与决策 | 首版完成 | ADR、行为边界、支持矩阵和 characterization tests 已落地 |
 | 1 统一 CLI | 首版完成 | `./stack`、结构化结果、退出码和兼容适配已落地 |
 | 2 类型化配置 | 加固完成，待实机复核 | Catalog 决定模型容量，Profile 只覆盖运行模式；schema v2 与矩阵测试已落地 |
-| 3 持久事务 | v2 已实现，待现场迁移 | recovery-required、事务 ID CAS、双锁、信号恢复和 supervisor maintenance wait 已落地；旧 v1 只读 |
+| 3 持久事务 | v2 已实现，覆盖待收口 | recovery-required、事务 ID CAS、双锁、信号恢复和 supervisor maintenance wait 已落地；当前主机 v1 已解析，quick/qualification 与 rollback spec 仍待统一纳入 |
 | 4 证据晋级 | 门禁实现，尚无可晋级证据 | schema v4 绑定当前制品/完整安全信封；full、性能、受信签名和生命周期必须同时通过 |
 | 5 最小权限运维 | 部分完成，跨仓库阻塞 | aggregate-only 快照和零凭据 Dashboard 已完成；专用 scope 待 ModelPort |
 | 6 供应链与 bundle | 首版完成，持续强化 | 固定身份、来源审计和离线 bundle 已落地；签名覆盖继续扩展 |
@@ -250,10 +275,10 @@ planned
 1. 在明确批准的维护窗口完成至少三轮 `baseline-only` 校准，评审后写入硬阈值；
 2. 在干净提交上运行 schema v4 `full`，复核逐步结果、制品和完整容器安全信封，再用固定的
    受信公钥策略签名；
-3. 显式审阅并处理本机 legacy transaction；在此之前 supervisor 只等待，不自动覆盖健康实例；
+3. 将 quick/qualification 和 immutable rollback spec 纳入统一事务，不能把本轮 owner 恢复演练冒充完整 rollback；
 4. 与 ModelPort 约定 provider self-attestation/health contract，并把 operations、数据库、
    Dashboard、备份和管理员凭据代码迁出核心；
 5. 解除 Catalog admission 对 reusable attestation/offline bundle 的依赖，再把两者迁为可选
    发布工具或删除；核心只保留签名 Git release、固定 artifact identity 和本机 qualification；
-6. 只为 Tier-1 WSL2/RTX 5070 Ti 积累重启与失败恢复证据；native Linux 在有真实主机证据前
-   保持 Tier-2 只读诊断。
+6. 为 Tier-1 WSL2/RTX 5070 Ti 补齐真实 shutdown/reboot、Docker 延迟就绪和失败恢复证据；
+   native Linux 在有真实主机证据前保持 Tier-2 只读诊断。上述 Phase B 门槛关闭前不启动 Phase C。

@@ -102,6 +102,7 @@ LEGACY_STATES = {
     "completed",
 }
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+MAX_TRANSACTION_BYTES = 4 * 1024 * 1024
 
 
 def _boot_id() -> str:
@@ -307,6 +308,253 @@ def _atomic_json(path: Path, document: dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
+def _read_private_json_at(
+    directory_descriptor: int, name: str, *, label: str
+) -> dict[str, Any]:
+    """Read a stable private JSON name relative to an already verified directory."""
+
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_descriptor,
+        )
+    except OSError as exc:
+        raise RecoveryError(f"cannot open {label}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        named = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size > MAX_TRANSACTION_BYTES
+            or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise RecoveryError(
+                f"{label} is not a bounded private current-user regular file"
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_TRANSACTION_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        final = os.fstat(descriptor)
+        named_final = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        identity = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+        if (
+            len(body) > MAX_TRANSACTION_BYTES
+            or identity(final) != identity(metadata)
+            or (named_final.st_dev, named_final.st_ino)
+            != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise RecoveryError(f"{label} changed while it was read")
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecoveryError(f"{label} is unreadable: {exc}") from exc
+        if not isinstance(document, dict):
+            raise RecoveryError(f"{label} must contain a JSON object")
+        return document
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_json_noreplace(
+    path: Path, document: dict[str, Any]
+) -> dict[str, Any]:
+    """Publish JSON atomically without ever replacing an existing name."""
+
+    body = (
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if len(body) > MAX_TRANSACTION_BYTES:
+        raise RecoveryError("transaction archive exceeds the bounded size policy")
+    flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        directory_descriptor = os.open(path.parent, flags)
+    except OSError as exc:
+        raise RecoveryError(f"cannot open the transaction archive directory: {exc}") from exc
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor: int | None = None
+    try:
+        metadata = os.fstat(directory_descriptor)
+        named = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise RecoveryError(
+                "transaction archive directory is not private and current-user-owned"
+            )
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        view = memoryview(body)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RecoveryError("transaction archive write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        try:
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            pass
+        os.unlink(temporary_name, dir_fd=directory_descriptor)
+        temporary_name = ""
+        os.fsync(directory_descriptor)
+        archived = _read_private_json_at(
+            directory_descriptor,
+            path.name,
+            label="transaction archive",
+        )
+        try:
+            named_final = path.parent.lstat()
+        except OSError as exc:
+            raise RecoveryError(
+                f"transaction archive directory changed during publish: {exc}"
+            ) from exc
+        if (named_final.st_dev, named_final.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
+        ):
+            raise RecoveryError("transaction archive directory changed during publish")
+        return archived
+    except OSError as exc:
+        raise RecoveryError(f"cannot publish the transaction archive safely: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
+        os.close(directory_descriptor)
+
+
+def _read_private_json(path: Path, *, label: str) -> dict[str, Any]:
+    """Read one bounded private JSON file through a stable no-follow descriptor."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RecoveryError(f"cannot open {label}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        try:
+            named = path.lstat()
+        except OSError as exc:
+            raise RecoveryError(f"cannot inspect {label}: {exc}") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size > MAX_TRANSACTION_BYTES
+            or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise RecoveryError(
+                f"{label} is not a bounded private current-user regular file"
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_TRANSACTION_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        final = os.fstat(descriptor)
+        try:
+            named_final = path.lstat()
+        except OSError as exc:
+            raise RecoveryError(f"{label} changed while it was read: {exc}") from exc
+        identity = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+        if (
+            len(body) > MAX_TRANSACTION_BYTES
+            or identity(final) != identity(metadata)
+            or (named_final.st_dev, named_final.st_ino)
+            != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise RecoveryError(f"{label} changed while it was read")
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecoveryError(f"{label} is unreadable: {exc}") from exc
+        if not isinstance(document, dict):
+            raise RecoveryError(f"{label} must contain a JSON object")
+        return document
+    finally:
+        os.close(descriptor)
+
+
 def _prepare_private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     metadata = path.lstat()
@@ -350,6 +598,46 @@ class TransactionStore:
         self.paths = paths
         self.path = paths.transaction_path
         self.lock_path = paths.state_dir / "transaction.lock"
+        self.archive_dir = paths.state_dir / "transactions"
+
+    def archive_path(self, transaction_id: str) -> Path:
+        """Return a traversal-safe content address for one transaction ID."""
+
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise RecoveryError("transaction archive requires a non-empty id")
+        key = hashlib.sha256(transaction_id.encode("utf-8")).hexdigest()
+        return self.archive_dir / f"{key}.json"
+
+    @staticmethod
+    def _read_private_document(path: Path) -> dict[str, Any]:
+        document = _read_private_json(path, label="transaction archive")
+        TransactionStore._validate(document)
+        return document
+
+    def _archive_terminal(self, document: dict[str, Any]) -> Path:
+        """Persist one exact terminal document before its single-slot pointer moves."""
+
+        self._validate(document)
+        if not is_terminal(document):
+            raise RecoveryError("only a verified terminal transaction can be archived")
+        path = self.archive_path(document["id"])
+        _prepare_private_directory(self.archive_dir)
+        archived = _atomic_json_noreplace(path, document)
+        self._validate(archived)
+        if archived != document:
+            raise RecoveryError(
+                "transaction archive conflicts with the terminal transaction"
+            )
+        return path
+
+    def archive_current_terminal(self) -> Path:
+        """Idempotently archive the current terminal slot under the store lock."""
+
+        with self.locked():
+            document = self.read()
+            if not document or not is_terminal(document):
+                raise RecoveryError("there is no verified terminal transaction to archive")
+            return self._archive_terminal(document)
 
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:
@@ -457,23 +745,7 @@ class TransactionStore:
     def read(self) -> dict[str, Any] | None:
         if not self.path.exists() and not self.path.is_symlink():
             return None
-        try:
-            metadata = self.path.lstat()
-        except OSError as exc:
-            raise RecoveryError(f"cannot inspect transaction state: {exc}") from exc
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or metadata.st_nlink != 1
-            or stat.S_IMODE(metadata.st_mode) & 0o077
-        ):
-            raise RecoveryError(
-                "transaction state is not a private current-user regular file"
-            )
-        try:
-            document = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RecoveryError(f"transaction state is unreadable: {exc}") from exc
+        document = _read_private_json(self.path, label="transaction state")
         self._validate(document)
         return document
 
@@ -567,6 +839,8 @@ class TransactionStore:
                             "state": existing["state"],
                         },
                     )
+                if existing:
+                    self._archive_terminal(existing)
                 now = utc_now()
                 document = {
                     "schemaVersion": SCHEMA_VERSION,
@@ -721,6 +995,8 @@ class TransactionStore:
             document["updatedAt"] = now
             document["history"].append(event)
             _atomic_json(self.path, document)
+            if is_terminal(document):
+                self._archive_terminal(document)
             return document
 
     def resolve_legacy_failed(
@@ -756,6 +1032,7 @@ class TransactionStore:
                 "resolution": target_state,
             }
             _atomic_json(self.path, document)
+            self._archive_terminal(document)
             return document
 
     def resolve_legacy_active(
@@ -793,6 +1070,7 @@ class TransactionStore:
                 "resolution": target_state,
             }
             _atomic_json(self.path, document)
+            self._archive_terminal(document)
             return document
 
     def reconciliation_plan(self) -> dict[str, Any]:

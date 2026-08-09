@@ -32,11 +32,21 @@
 选择仍可在主机准入通过后恢复，但不能借恢复入口下载、选择或部署新模型。若进程或 WSL 在切换/候选发布中断，
 先运行 `./stack reconcile --json` 查看精确恢复动作，经确认后执行 `./stack reconcile --yes`。
 
+`existing-selection` 恢复与新部署准入回答的是不同问题。已有 runtime 或其缓存会占用显存和
+内存，因此恢复时探测到的当前 free VRAM/RAM 只作为诊断信息，不因低于新部署余量就拒绝恢复；
+这不改变新部署的 `readyToDeploy=false` 硬停止，也不允许替换 Catalog、制品或 Profile。
+恢复启动后，健康端点、实际容器身份和 canonical Profile 必须全部通过，任何一项失败都是硬门槛，
+supervisor 不得把“这是已有选择”当成成功。
+
 失败事务进入 `recovery_required` 并阻止后续变更。旧 schema v1 `failed` 记录不再被猜测为已恢复：
 只读 reconcile 会先分类当前 runtime；只有显式批准后，才能在不触碰健康 canonical runtime 的
 前提下标记 `superseded-verified`，或在恢复并验证原身份后标记 `failed-restored`。
 处于 `planned/deploying/accepting` 的 v2 事务可能仍有发起进程存活，即使传入 `--yes` 也只会拒绝
 并等待；只有明确的 `recovery_required` 才进入 v2 恢复路径。每次状态转换都必须匹配原事务 ID。
+事务当前指针仍位于 `cache/control-plane/transaction.json`；每个经过验证的终态会在下一事务覆盖
+指针前，以 `0600` 单文件归档到私有 `cache/control-plane/transactions/`。归档冲突或不安全路径
+会 fail closed。早于该策略且已被覆盖的 legacy 迁移只能写成明确标注证据限制的本机 migration
+ledger，不能补造终结时间或伪造原始事务文档。
 
 必需的 standalone 健康入口：
 
@@ -76,10 +86,16 @@ Docker 临时不可用可以继续等待；显存准入、哈希、权限或配�
 活动 transaction、维护 lease 或 runtime lock 冲突只会使 supervisor 等待；它不得在 deploy、
 Profile 切换或候选发布期间擅自启动新选择，也不得把正常维护锁竞争当成永久故障。
 
-已有容器不会因仓库模板改变而自动取得新 restart policy。维护窗口必须先处理所有待恢复事务，
-然后通过受事务保护的 `./stack profile latency --yes` 受控 recreate；最后安装/重启 runtime-only
-unit，并确认实际容器的 restart policy 为 `no`、supervisor 为 active。该切换会造成短暂停机，
-不得在未批准窗口直接执行，也不得仅用 `docker update` 伪造完成状态。
+本轮 Tier-1 主机的 owner-migration 维护切片已经完成：历史 schema v1 事务已显式解析为安全终态，
+本机私有 selection 已按当前结构和权限规范化，实际容器 restart policy 已受控迁移为 `no`，
+systemd user supervisor 已成为唯一自动恢复 owner。随后完成了一次“停止 runtime → 由 systemd
+supervisor 恢复 → 健康与 canonical 身份复核”的演练，并通过维护后 quick recheck 的单测、制品、
+直接生成和推理最小路径。该结果只证明当前运行身份和 supervisor 切换路径，不等同于完整升级、
+回滚或主机 qualification，也不能替代一次真实的 WSL 关闭/重启验证。
+
+这只是 Phase B 的 owner-migration slice。类型化 `stack upgrade/rollback`、quick 与完整
+qualification 的统一事务覆盖、可持久恢复的 rollback spec，以及真实 WSL reboot 后的恢复证据
+仍未完成。在这些门槛关闭前禁止开始 Phase C，尤其不得据此删除旧 reader、candidate 或恢复路径。
 
 若要求 WSL 启动后无需交互登录即可运行 user manager，需要由主机维护者显式启用 linger：
 
@@ -110,7 +126,8 @@ curl --noproxy '*' http://127.0.0.1:18080/health
 - `runtimeHealthy=true` 且 `/health` 为 `ok`：服务数据面可用，不要再次 deploy；若同时
   `controlPlaneReady=false`，命令会以 attention/恢复退出码返回，表示仍不能安全执行下一次变更；
 - plan 因空闲 VRAM 低而 `readyToDeploy=false`，同时 runtime 健康：现有模型占用 GPU，
-  只是禁止新部署；
+  只是禁止新部署；existing-selection 恢复把当前 free VRAM/RAM 视为 advisory，但启动后的健康、
+  Profile 与实际身份仍是硬门槛；
 - schema v2 的 `failed-restored`/`superseded-verified` 是已验证终态；旧 schema v1 `failed`
   必须由只读 reconcile 分类，不能仅凭时间或当前健康状态自动关闭；
 - supervisor 持续等待且 `docker version` 失败：先恢复 Docker Desktop/WSL 集成，

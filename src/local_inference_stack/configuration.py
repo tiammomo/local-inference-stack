@@ -52,6 +52,10 @@ SELECTED_DEPLOYMENT_REQUIRED_KEYS = {
     "QWEN_RUNTIME_GID",
     "MODELPORT_NETWORK_NAME",
 }
+LEGACY_SELECTED_MIGRATABLE_MISSING_KEYS = {
+    "QWEN_CACHE_TYPE_K",
+    "QWEN_CACHE_TYPE_V",
+}
 
 
 def load(paths: ProjectPaths) -> dict[str, Any]:
@@ -170,18 +174,21 @@ def catalog_deployment_environment(
 def selected_deployment_values_mode(
     model: dict[str, Any], values: dict[str, str]
 ) -> str:
-    """Classify a private selection without treating legacy omissions as overrides."""
+    """Classify an exact selection or the one reviewed legacy KV omission."""
 
     expected = catalog_deployment_environment(model)
     if values == expected:
         return "exact-current-projection"
+    missing = set(expected) - set(values)
     if (
         SELECTED_DEPLOYMENT_REQUIRED_KEYS.issubset(values)
-        and set(values).issubset(expected)
+        and bool(missing)
+        and missing.issubset(LEGACY_SELECTED_MIGRATABLE_MISSING_KEYS)
+        and set(values) == set(expected) - missing
         and all(expected.get(key) == value for key, value in values.items())
     ):
-        # Missing fields are safe only because `stack config check` proves the
-        # Compose defaults are the same current Catalog projection before start.
+        # Historical profiles on the reviewed Tier-1 host omitted only these
+        # two q8_0 fields.  They are migration inputs, never start authority.
         return "legacy-compatible-current-defaults"
     return "mismatch"
 

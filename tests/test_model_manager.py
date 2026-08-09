@@ -970,9 +970,48 @@ class CatalogTests(unittest.TestCase):
             payload["selectedConfigurationMode"], "exact-current-projection"
         )
         self.assertTrue(payload["recoveryHardwareProfileMatch"])
+        self.assertTrue(payload["recoveryResourcesAvailableNow"])
         self.assertTrue(payload["readyToStartExisting"])
 
-    def test_legacy_selection_may_omit_only_current_catalog_backed_defaults(self) -> None:
+    def test_existing_selection_recovery_treats_current_free_capacity_as_advisory(self) -> None:
+        model = MODEL_MANAGER.model_by_id(self.catalog, "qwen35-9b-q5km")
+        busy_exact_host = host(
+            16,
+            ram=96,
+            free_vram=9.9,
+            name="NVIDIA GeForce RTX 5070 Ti",
+        )
+        with (
+            patch.object(MODEL_MANAGER, "host_assessment", return_value=busy_exact_host),
+            patch.object(MODEL_MANAGER, "LOCAL_PROFILE", Path("/private/selection")),
+            patch.object(MODEL_MANAGER.Path, "is_file", return_value=True),
+            patch.object(MODEL_MANAGER, "selected_model", return_value=model),
+            patch.object(
+                MODEL_MANAGER,
+                "deployment_values",
+                return_value=MODEL_MANAGER.deployment_environment(model),
+            ),
+            patch.object(MODEL_MANAGER, "discover_host_acceptance", return_value=None),
+        ):
+            payload = MODEL_MANAGER.admission_payload(
+                self.catalog,
+                model["id"],
+                existing_selection=True,
+            )
+
+        self.assertFalse(payload["readyToDeploy"])
+        self.assertFalse(payload["resourceAvailableNow"])
+        self.assertFalse(payload["recoveryResourcesAvailableNow"])
+        self.assertTrue(payload["recoveryHostAdmissionPassed"])
+        self.assertTrue(payload["readyToStartExisting"])
+        self.assertTrue(
+            any(
+                "Existing-selection recovery may still attempt" in caveat
+                for caveat in payload["caveats"]
+            )
+        )
+
+    def test_legacy_selection_requires_explicit_migration_before_recovery(self) -> None:
         model = MODEL_MANAGER.model_by_id(self.catalog, "qwen35-9b-q5km")
         exact = host(
             16,
@@ -995,12 +1034,15 @@ class CatalogTests(unittest.TestCase):
                 model["id"],
                 existing_selection=True,
             )
-        self.assertTrue(payload["selectedConfigurationMatchesCatalog"])
+        self.assertFalse(payload["selectedConfigurationMatchesCatalog"])
         self.assertEqual(
             payload["selectedConfigurationMode"],
             "legacy-compatible-current-defaults",
         )
-        self.assertTrue(payload["readyToStartExisting"])
+        self.assertFalse(payload["readyToStartExisting"])
+        self.assertTrue(
+            any("./stack migrate --yes" in caveat for caveat in payload["caveats"])
+        )
 
     def test_existing_selection_recovery_rejects_profile_or_host_substitution(self) -> None:
         model = MODEL_MANAGER.model_by_id(self.catalog, "qwen35-9b-q5km")
