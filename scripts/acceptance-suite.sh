@@ -197,7 +197,7 @@ standard_suite() {
   fi
   if ! command -v node >/dev/null 2>&1; then
     printf 'standard requires Linux Node.js 24 on PATH for ModelPort checks.\n' >&2
-    printf 'With NVM, run: source "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm use 24\n' >&2
+    printf '%s\n' "With NVM, run: source \"\${NVM_DIR:-\$HOME/.nvm}/nvm.sh\" && nvm use 24" >&2
     exit 2
   fi
   node_path="$(command -v node)"
@@ -211,7 +211,7 @@ standard_suite() {
   if [[ "$node_major" != "24" ]]; then
     printf 'standard requires the project-tested Node.js 24 major; resolved=%s (%s).\n' \
       "$node_path" "$(node --version 2>/dev/null || printf unknown)" >&2
-    printf 'With NVM, run: source "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm install && nvm use\n' >&2
+    printf '%s\n' "With NVM, run: source \"\${NVM_DIR:-\$HOME/.nvm}/nvm.sh\" && nvm install && nvm use" >&2
     exit 2
   fi
   modelport_endpoint="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"

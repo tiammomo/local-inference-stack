@@ -34,8 +34,7 @@ is_running() {
 }
 
 wait_healthy() {
-  local attempt
-  for attempt in $(seq 1 180); do
+  for _ in {1..180}; do
     if curl --noproxy '*' -fsS "$CANDIDATE_URL/health" >/dev/null 2>&1; then
       printf 'Candidate is healthy at %s\n' "$CANDIDATE_URL"
       return 0
