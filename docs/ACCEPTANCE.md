@@ -25,6 +25,19 @@ nvm use
 node --version
 ```
 
+### rollout 内部 quick 的边界
+
+类型化 upgrade/rollback 在切换前后调用内部 `quick --no-record`。它绑定到当前 transaction 的
+下一 action，只作为“这个精确 runtime 能否继续完成或回退”的服务门禁；`--no-record` 明确禁止
+产生新的 schema v4 host evidence。因此一次成功的 upgrade/rollback quick：
+
+- 不构成模型、量化、镜像、上下文或主机的 qualification；
+- 不会把 `evidenceStatus` 改成 `validated-on-this-host`；
+- 不能签署 reusable attestation、晋级 Catalog 或改写 deployment manifest 的历史验证结论。
+
+需要新 qualification 时仍须独立运行受评审的 `full`。把 full runner 的逐步记录和结论完整绑定到
+同一个 rollout transaction 仍是 Phase B 完成条件，不能用 quick 输出摘要替代。
+
 ### standard/full 联合前置条件
 
 | 前置项 | 通过条件 | 典型修复 |
@@ -188,3 +201,10 @@ MODELPORT_PROJECT_DIR=/path/to/ModelPort \
 
 失败时恢复上一 Git revision、镜像 digest、Catalog 制品和 Profile，再运行 quick。
 旧 GGUF 删除前必须完成回滚演练；任何 recreate 都会重置连续运行计时。
+
+上面的 `release` 是兼容性串行候选流程，不是类型化生产 upgrade。正式路径是先只读审阅
+`./stack upgrade --model CATALOG_ID` 或 `./stack rollback`，再显式批准对应 `--yes` 命令；详细
+scope 和恢复规则见[升级与回滚](UPGRADING.md)。rollback 只使用同主机、同 controller、当前
+Catalog 仍认可的本地 immutable anchor，不联网、不 pull、不 checkout Git，并固定恢复
+`latency`。当前 Catalog 只有 provisional 条目，不能形成合法 validated rollback/LTS 模型对，
+所以真实 upgrade/rollback 按设计 fail closed。

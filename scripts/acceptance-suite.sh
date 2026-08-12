@@ -153,10 +153,17 @@ run_step() {
   step_started_at="$(date --iso-8601=seconds)"
   step_started_epoch="$(date +%s)"
   printf '\n[%s] %s\n' "$step_started_at" "$name"
+  # A rollout quick smoke spans several external processes.  Recheck the
+  # persisted transaction/spec/action immediately before and after every step
+  # so a fenced, replaced, or advanced transaction cannot inherit a passing
+  # result from work performed for another subject.  Outside a transaction the
+  # helper is intentionally a no-op.
+  assert_approved_catalog_spec "$ROOT_DIR" true
   set +e
   "$@"
   step_status=$?
   set -e
+  assert_approved_catalog_spec "$ROOT_DIR" true
   step_finished_at="$(date --iso-8601=seconds)"
   step_finished_epoch="$(date +%s)"
   step_duration=$((step_finished_epoch - step_started_epoch))

@@ -24,7 +24,7 @@
 ./scripts/runtime.sh stop
 ```
 
-`restart` 和 `start` 会先验证活动模型。启动、停止、重启、Profile 切换和候选发布由同一
+`restart` 和 `start` 会先验证活动模型。启动、停止、重启、Profile 切换、upgrade、rollback 和候选发布由同一
 `flock` 与持久事务串行化；启动只有在健康探针通过后才返回成功。默认 `latency` 是单 Slot；只有两个短上下文
 任务并发时才显式切换 `./stack profile throughput --yes`，完成后恢复 `latency`。
 
@@ -47,6 +47,35 @@ supervisor 不得把“这是已有选择”当成成功。
 指针前，以 `0600` 单文件归档到私有 `cache/control-plane/transactions/`。归档冲突或不安全路径
 会 fail closed。早于该策略且已被覆盖的 legacy 迁移只能写成明确标注证据限制的本机 migration
 ledger，不能补造终结时间或伪造原始事务文档。
+
+## 类型化升级与一次性回滚
+
+公共命令默认只读；先审阅 upgrade 的 source/target 准入或 rollback 的 pointer/action plan，再批准
+维护窗口：
+
+```bash
+./stack upgrade --model CATALOG_ID
+./stack upgrade --model CATALOG_ID --yes
+
+./stack rollback
+./stack rollback --yes
+```
+
+upgrade/rollback v1 的 scope 固定为 `same-controller-same-catalog-anchor-v1`：只支持同一可信
+Tier-1 WSL2 x86_64 主机、同一精确控制器材料集合、当前 Catalog 中仍有效的锚点、`latency`
+Profile，以及本地可完整复核的 GGUF 与固定镜像 ID。rollback 不联网、不下载、不 pull 镜像、
+不 checkout Git，也不会从当前 selection 临时拼出锚点。controller、Catalog、host、evidence、
+artifact、Compose、image 或 pointer 任一不匹配都会 fail closed。
+
+upgrade 成功后才发布一次性 active rollback pointer；rollback 通过后将它清为单调 tombstone，
+不能重复消费。两个流程内部的 `quick --no-record` 只是事务中的服务门禁：不会写 host acceptance，
+不等于 full qualification，也不会赋予 Catalog 晋级资格。需要 qualification 时必须走独立、受评审
+的 `full` 流程；其结果与 rollout transaction 的完整绑定仍是 Phase B 待办。
+
+当前 Catalog 只有一个 provisional 条目，没有合法的 validated rollback/LTS 模型对；新安装也没有
+active pointer。因此真实 upgrade/rollback 会在准入或 pointer 检查处停止。不要手工伪造 Catalog、
+evidence、selection、spec 或 pointer。执行中断后先运行 `./stack reconcile --json`，不要启动第二个
+rollout；审阅恢复计划后才执行 `./stack reconcile --yes`。
 
 必需的 standalone 健康入口：
 
@@ -93,9 +122,11 @@ supervisor 恢复 → 健康与 canonical 身份复核”的演练，并通过�
 直接生成和推理最小路径。该结果只证明当前运行身份和 supervisor 切换路径，不等同于完整升级、
 回滚或主机 qualification，也不能替代一次真实的 WSL 关闭/重启验证。
 
-这只是 Phase B 的 owner-migration slice。类型化 `stack upgrade/rollback`、quick 与完整
-qualification 的统一事务覆盖、可持久恢复的 rollback spec，以及真实 WSL reboot 后的恢复证据
-仍未完成。在这些门槛关闭前禁止开始 Phase C，尤其不得据此删除旧 reader、candidate 或恢复路径。
+这仍不是完整 Phase B。类型化 `stack upgrade/rollback`、持久 immutable rollback spec、一次性
+pointer、逐 action 事务授权和 `quick --no-record` 服务门禁已经落地；尚缺把 `full` qualification
+记录完整绑定到同一 rollout transaction、在合法模型对上的 Tier-1 真实 upgrade→rollback drill，
+以及真实 WSL reboot 后的事务/supervisor 恢复证据。在这些门槛关闭前禁止开始 Phase C，尤其不得
+据此删除旧 reader、candidate 或恢复路径。
 
 若要求 WSL 启动后无需交互登录即可运行 user manager，需要由主机维护者显式启用 linger：
 
@@ -229,6 +260,7 @@ Prompt RAM Cache 自动工作；稳定 system prompt、工具定义和规则放�
 | ModelPort 找不到 `qwen-runtime` | 检查 `modelport_default` 网络、容器健康和 DNS alias |
 | Operations Collector 登录返回 401 | ModelPort 凭据已旋转；用支持的 provision 流程重建本地私有凭据 |
 | Docker credential helper `exec format error` | 检查 `WSLInterop`；优先完整 `wsl --shutdown` 后复核，不改写敏感 Docker 配置 |
+| upgrade/rollback 中断或 `recovery_required` | 只读运行 `stack reconcile --json`，审阅并批准 `stack reconcile --yes`；不要手写 pointer 或开始第二个事务 |
 | 只有 reasoning、没有正文 | 用精确 Token 计数检查输入，增加合理 `max_tokens` 或降低思考预算 |
 | 磁盘/备份/systemd 告警 | 运行带 `--fail-on-alert` 的报告，验证最新备份并检查 user journal |
 

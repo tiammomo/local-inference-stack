@@ -398,6 +398,217 @@ class ActionKind(str, Enum):
     QUICK_SMOKE = "quick-smoke"
 
 
+class RolloutActionKind(str, Enum):
+    """Typed maintenance-window actions with no executable payload."""
+
+    SOURCE_QUICK = "source-quick"
+    FETCH_TARGET_ARTIFACT = "fetch-target-artifact"
+    STOP_SOURCE = "stop-source"
+    ACTIVATE_TARGET = "activate-target"
+    START_TARGET = "start-target"
+    TARGET_QUICK = "target-quick"
+    PUBLISH_ROLLBACK = "publish-rollback"
+    CLEAR_ROLLBACK = "clear-rollback"
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutAction:
+    ordinal: int
+    kind: RolloutActionKind
+    subject: str
+    catalog_id: str
+    artifact_sha256: str | None = None
+
+    def document(self) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "ordinal": self.ordinal,
+            "kind": self.kind.value,
+            "subject": self.subject,
+            "catalogId": self.catalog_id,
+        }
+        if self.artifact_sha256 is not None:
+            document["artifactSha256"] = self.artifact_sha256
+        return document
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutPlan:
+    """One exact ordered upgrade or rollback intent.
+
+    The plan binds an immutable rollback object and the Catalog identity that
+    must be running when the transaction completes.  It deliberately carries
+    no command, path, URL, image pull, or arbitrary environment value.
+    """
+
+    operation: str
+    rollback_spec_sha256: str
+    source_catalog_spec_sha256: str
+    target_catalog_spec_sha256: str
+    actions: tuple[RolloutAction, ...]
+    required_acceptance_tier: str = "quick"
+    requires_approval: bool = True
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "operation": self.operation,
+            "rollbackSpecSha256": self.rollback_spec_sha256,
+            "sourceCatalogSpecSha256": self.source_catalog_spec_sha256,
+            "targetCatalogSpecSha256": self.target_catalog_spec_sha256,
+            "requiredAcceptanceTier": self.required_acceptance_tier,
+            "requiresApproval": self.requires_approval,
+            "actions": [action.document() for action in self.actions],
+        }
+
+    @property
+    def sha256(self) -> str:
+        return canonical_sha256(self.document())
+
+
+def build_upgrade_rollout_plan(
+    source: CatalogDeploymentSpec,
+    target: CatalogDeploymentSpec,
+    rollback_spec_sha256: str,
+    *,
+    admission_granted: bool,
+) -> RolloutPlan:
+    """Build the v1 single-runtime upgrade sequence."""
+
+    if not admission_granted:
+        raise DeploymentSpecError("upgrade actions require explicit admission")
+    _sha256(rollback_spec_sha256, "rollback spec SHA256")
+    if source.catalog_id == target.catalog_id or source.sha256 == target.sha256:
+        raise DeploymentSpecError("upgrade source and target must be distinct")
+    actions: list[RolloutAction] = [
+        RolloutAction(0, RolloutActionKind.SOURCE_QUICK, "source", source.catalog_id)
+    ]
+    for artifact in target.artifacts:
+        if artifact.required:
+            actions.append(
+                RolloutAction(
+                    len(actions),
+                    RolloutActionKind.FETCH_TARGET_ARTIFACT,
+                    "target",
+                    target.catalog_id,
+                    artifact_sha256=artifact.sha256,
+                )
+            )
+    actions.extend(
+        (
+            RolloutAction(
+                len(actions), RolloutActionKind.STOP_SOURCE, "source", source.catalog_id
+            ),
+            RolloutAction(
+                len(actions) + 1,
+                RolloutActionKind.ACTIVATE_TARGET,
+                "target",
+                target.catalog_id,
+            ),
+            RolloutAction(
+                len(actions) + 2,
+                RolloutActionKind.START_TARGET,
+                "target",
+                target.catalog_id,
+            ),
+            RolloutAction(
+                len(actions) + 3,
+                RolloutActionKind.TARGET_QUICK,
+                "target",
+                target.catalog_id,
+            ),
+            RolloutAction(
+                len(actions) + 4,
+                RolloutActionKind.PUBLISH_ROLLBACK,
+                "source",
+                source.catalog_id,
+            ),
+        )
+    )
+    return RolloutPlan(
+        "upgrade",
+        rollback_spec_sha256,
+        source.sha256,
+        target.sha256,
+        tuple(actions),
+    )
+
+
+def build_rollback_rollout_plan(
+    current: CatalogDeploymentSpec,
+    anchor: CatalogDeploymentSpec,
+    rollback_spec_sha256: str,
+    *,
+    admission_granted: bool,
+) -> RolloutPlan:
+    """Build the v1 one-shot rollback sequence."""
+
+    if not admission_granted:
+        raise DeploymentSpecError("rollback actions require explicit admission")
+    _sha256(rollback_spec_sha256, "rollback spec SHA256")
+    if current.catalog_id == anchor.catalog_id or current.sha256 == anchor.sha256:
+        raise DeploymentSpecError("rollback source and anchor must be distinct")
+    actions = (
+        RolloutAction(0, RolloutActionKind.STOP_SOURCE, "source", current.catalog_id),
+        RolloutAction(1, RolloutActionKind.ACTIVATE_TARGET, "target", anchor.catalog_id),
+        RolloutAction(2, RolloutActionKind.START_TARGET, "target", anchor.catalog_id),
+        RolloutAction(3, RolloutActionKind.TARGET_QUICK, "target", anchor.catalog_id),
+        RolloutAction(4, RolloutActionKind.CLEAR_ROLLBACK, "target", anchor.catalog_id),
+    )
+    return RolloutPlan(
+        "rollback",
+        rollback_spec_sha256,
+        current.sha256,
+        anchor.sha256,
+        actions,
+    )
+
+
+def parse_rollout_plan(
+    value: Any,
+    *,
+    rollback_spec_sha256: str,
+    target: CatalogDeploymentSpec,
+    source: CatalogDeploymentSpec | None = None,
+) -> RolloutPlan:
+    """Validate an untrusted rollout plan by exact reconstruction."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion",
+        "operation",
+        "rollbackSpecSha256",
+        "sourceCatalogSpecSha256",
+        "targetCatalogSpecSha256",
+        "requiredAcceptanceTier",
+        "requiresApproval",
+        "actions",
+    }:
+        raise DeploymentSpecError("rollout plan has an invalid shape")
+    operation = value.get("operation")
+    if operation == "upgrade":
+        if source is None:
+            raise DeploymentSpecError("upgrade plan requires its source spec")
+        expected = build_upgrade_rollout_plan(
+            source,
+            target,
+            rollback_spec_sha256,
+            admission_granted=True,
+        )
+    elif operation == "rollback":
+        if source is None:
+            raise DeploymentSpecError("rollback plan requires its current source spec")
+        expected = build_rollback_rollout_plan(
+            source,
+            target,
+            rollback_spec_sha256,
+            admission_granted=True,
+        )
+    else:
+        raise DeploymentSpecError("rollout operation is not supported")
+    if value != expected.document():
+        raise DeploymentSpecError("rollout plan does not match its immutable subjects")
+    return expected
+
+
 @dataclass(frozen=True, slots=True)
 class DeploymentAction:
     kind: ActionKind

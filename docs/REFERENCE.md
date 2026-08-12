@@ -12,6 +12,8 @@
 - `./stack status` — 报告 runtime 与持久事务状态。
 - `./stack verify` — 在不改变运行状态的前提下验证仓库、配置或模型。
 - `./stack deploy` — 取得 --yes 批准后解释绑定 Catalog identity 的类型化部署计划。
+- `./stack upgrade` — 在维护窗口内按类型化事务替换 production，并保存精确回滚锚点。
+- `./stack rollback` — 只读检查或显式消费唯一的本机不可变回滚锚点。
 - `./stack accept` — 取得 --yes 批准后运行指定验收层级。
 - `./stack release` — 取得 --yes 批准后执行串行候选发布与生产恢复。
 - `./stack profile` — 通过持久事务切换固定生产 Profile。
@@ -71,6 +73,24 @@
 - 批准：必须 --yes，且 plan 必须准入。
 - 语法：`./stack deploy [--model CATALOG_ID] --yes [--json]`
 - 示例：`./stack deploy --model qwen35-9b-q5km --yes`
+
+### `./stack upgrade`
+
+仅支持同一 controller、同一 Catalog、本机已有恢复材料的类型化升级；不会自动晋级 Catalog。
+
+- 状态：默认只读；--yes 在单 runtime 维护窗口中下载、停止、替换并 quick smoke。
+- 批准：执行时必须 --yes，source/target/host/attestation 均须准入。
+- 语法：`./stack upgrade --model CATALOG_ID [--yes] [--json]`
+- 示例：`./stack upgrade --model CATALOG_ID --json`
+
+### `./stack rollback`
+
+离线消费私有内容寻址锚点，精确复核 Catalog、制品、镜像、主机和 controller 后恢复并 quick smoke。
+
+- 状态：默认只读；--yes 停止当前 runtime 并恢复唯一 active anchor。
+- 批准：执行时必须 --yes；不接受 model、路径、URL 或 image 参数。
+- 语法：`./stack rollback [--yes] [--json]`
+- 示例：`./stack rollback --json`
 
 ### `./stack accept`
 
@@ -277,5 +297,7 @@
 - `attestation`: 当前 `2`（仅 v2 可读；v1 缺少当前信任绑定，拒绝读取）
 - `bundle`: 当前 `2`（可读 v1/v2；v1 仅支持纯制品，未绑定镜像 archive 必须重建）
 - `commandResult`: 当前 `1`（仅 v1 可读）
+- `rollbackPointer`: 当前 `1`（仅 v1 可读；私有单调 generation 与精确 CAS）
+- `rollbackSpec`: 当前 `1`（仅 v1 可读；同 controller、同 Catalog、本机离线恢复）
 - `runtimeProfiles`: 当前 `2`（可读 v1/v2；v1 只读检查）
 - `transaction`: 当前 `2`（可读 v1/v2；v1 必须分类并经显式 reconcile 处理）

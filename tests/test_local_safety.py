@@ -407,19 +407,24 @@ class RuntimeMutationLockTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
 
     def test_shell_lock_rejects_unmatched_active_transaction(self) -> None:
-        transaction_id = "9cb16379-23b0-46c4-893d-1b4f9906a9af"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            control = root / "cache" / "control-plane"
-            control.mkdir(parents=True)
-            transaction = {
-                "schemaVersion": 2,
-                "id": transaction_id,
-                "state": "recovery_required",
-            }
-            state = control / "transaction.json"
-            state.write_text(json.dumps(transaction), encoding="utf-8")
-            state.chmod(0o600)
+            store = SUPERVISOR.TransactionStore(SUPERVISOR.ProjectPaths(root))
+            transaction = store.begin(
+                "release",
+                "quick",
+                {
+                    "healthy": False,
+                    "containerHealthy": False,
+                    "profile": "unknown",
+                    "containerName": None,
+                    "runtimeIdentity": None,
+                    "deploymentProfile": {"present": False},
+                    "capturedWithoutSecrets": True,
+                },
+            )
+            transaction_id = transaction["id"]
+            store.transition("recovery_required", expected_id=transaction_id)
             library = ROOT_DIR / "scripts" / "lib" / "deployment.sh"
             command = (
                 f"source {library}; acquire_runtime_lock {root}"

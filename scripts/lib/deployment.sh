@@ -82,8 +82,14 @@ from local_inference_stack.transactions import TransactionStore, is_terminal
 document = TransactionStore(ProjectPaths(root)).read()
 if not document or document.get("id") != sys.argv[3] or is_terminal(document):
     raise SystemExit("the active control transaction identity changed")
-if document.get("schemaVersion") == 2 and document.get("operation") == "deploy":
-    raise SystemExit("active deploy transaction is missing its approved Catalog spec SHA256")
+if (
+    document.get("schemaVersion") == 2
+    and document.get("operation") in {"deploy", "upgrade", "rollback"}
+    and document.get("state") not in {"recovery_required", "production_restoring"}
+):
+    raise SystemExit(
+        "active Catalog-bound transaction is missing its approved Catalog spec SHA256"
+    )
 PY
     return
   fi
@@ -171,60 +177,69 @@ acquire_runtime_lock() {
   # sentinel only avoids reopening a parent's lock; it is never authorization.
   if ! python3 - \
     "$package_root" \
-    "$control_dir/transaction.json" \
+    "$root_dir" \
     "${QWEN_CONTROL_TRANSACTION_ID:-}" \
     "${LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256:-}" \
-    "$QWEN_CATALOG_ID" <<'PY'
-import json
-import os
-import stat
+    "$QWEN_CATALOG_ID" \
+    "${LOCAL_INFERENCE_ROLLOUT_SUBJECT:-}" \
+    "${LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL:-}" \
+    "${LOCAL_INFERENCE_ROLLOUT_ACTION_KIND:-}" \
+    "${LOCAL_INFERENCE_RUNTIME_PULL_POLICY:-}" <<'PY'
 import sys
 import uuid
 from pathlib import Path
 
-root = Path(sys.argv[1])
-sys.path.insert(0, str(root / "src"))
-from local_inference_stack.deployment import DeploymentSpecError, parse_approved_deployment
+package_root = Path(sys.argv[1])
+project_root = Path(sys.argv[2])
+sys.path.insert(0, str(package_root / "src"))
+from local_inference_stack.paths import ProjectPaths
+from local_inference_stack.result import RecoveryError
+from local_inference_stack.transactions import TransactionStore, is_terminal
 
-path = Path(sys.argv[2])
 provided = sys.argv[3]
 catalog_spec_sha256 = sys.argv[4]
 catalog_id = sys.argv[5]
+rollout_subject = sys.argv[6] or None
+encoded_ordinal = sys.argv[7]
+action_kind = sys.argv[8] or None
+pull_policy = sys.argv[9] or None
+action_ordinal = None
+if pull_policy not in {None, "never"}:
+    raise SystemExit("unsupported controlled runtime pull policy")
+if pull_policy is not None and not provided:
+    raise SystemExit("controlled runtime pull policy requires a rollout transaction")
 if provided:
     try:
         if str(uuid.UUID(provided)) != provided:
             raise ValueError
     except ValueError:
         raise SystemExit("QWEN_CONTROL_TRANSACTION_ID must be a canonical UUID")
+if encoded_ordinal:
+    if (
+        not encoded_ordinal.isascii()
+        or not encoded_ordinal.isdecimal()
+        or (len(encoded_ordinal) > 1 and encoded_ordinal.startswith("0"))
+    ):
+        raise SystemExit("rollout action ordinal must be a decimal integer")
+    action_ordinal = int(encoded_ordinal)
 
-if not path.exists() and not path.is_symlink():
+store = TransactionStore(ProjectPaths(project_root))
+try:
+    document = store.read()
+except RecoveryError as error:
+    raise SystemExit(str(error)) from error
+if document is None:
     if provided:
         raise SystemExit("the authorized control transaction no longer exists")
+    if pull_policy is not None:
+        raise SystemExit(
+            "controlled runtime pull policy requires a rollout transaction"
+        )
     raise SystemExit(0)
-
-metadata = path.lstat()
-if (
-    not stat.S_ISREG(metadata.st_mode)
-    or metadata.st_uid != os.getuid()
-    or metadata.st_nlink != 1
-    or stat.S_IMODE(metadata.st_mode) & 0o077
-):
-    raise SystemExit("transaction state is not a private current-user regular file")
-try:
-    document = json.loads(path.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"transaction state is unreadable: {exc}") from exc
 
 schema = document.get("schemaVersion")
 state = document.get("state")
-terminal = (
-    (schema == 1 and state == "completed")
-    or (
-        schema == 2
-        and state in {"completed", "failed-restored", "superseded-verified"}
-    )
-)
-if terminal:
+if is_terminal(document):
     if provided:
         raise SystemExit("the authorized control transaction is already terminal")
     raise SystemExit(0)
@@ -235,28 +250,61 @@ if not provided or document.get("id") != provided:
         "an active control transaction blocks this runtime mutation; "
         "use the matching public control-plane command"
     )
+operation = document.get("operation")
+rollback_start = (
+    schema == 2
+    and operation == "rollback"
+    and state == "candidate_starting"
+    and rollout_subject == "target"
+    and action_kind == "start-target"
+    and action_ordinal is not None
+)
+rollout_recovery = (
+    schema == 2
+    and operation in {"upgrade", "rollback"}
+    and state == "production_restoring"
+    and not catalog_spec_sha256
+    and rollout_subject is None
+    and action_ordinal is None
+    and action_kind is None
+)
+if (rollback_start or rollout_recovery) and pull_policy != "never":
+    raise SystemExit(
+        "rollback start-target and rollout recovery require --pull never"
+    )
+if pull_policy is not None and not (rollback_start or rollout_recovery):
+    raise SystemExit(
+        "controlled no-pull startup is restricted to rollback start-target "
+        "or rollout recovery"
+    )
 binding_required = (
     schema == 2
-    and document.get("operation") == "deploy"
-    and state in {"planned", "deploying", "accepting"}
+    and document.get("operation") in {"deploy", "upgrade", "rollback"}
+    and state not in {"recovery_required", "production_restoring"}
 )
-if binding_required or catalog_spec_sha256:
+if (
+    binding_required
+    or catalog_spec_sha256
+    or rollout_subject is not None
+    or action_ordinal is not None
+    or action_kind is not None
+):
     if not catalog_spec_sha256:
-        raise SystemExit("active deploy transaction is missing its approved Catalog spec SHA256")
-    try:
-        spec = parse_approved_deployment(
-            {
-                "schemaVersion": 1,
-                "approvedCatalogSpecSha256": document.get(
-                    "approvedCatalogSpecSha256"
-                ),
-                "catalogSpec": document.get("approvedCatalogSpec"),
-            }
+        raise SystemExit(
+            "active Catalog-bound transaction is missing its approved Catalog spec SHA256"
         )
-    except DeploymentSpecError as error:
-        raise SystemExit(f"deploy transaction has an invalid approved Catalog spec: {error}") from error
-    if spec.sha256 != catalog_spec_sha256 or spec.catalog_id != catalog_id:
-        raise SystemExit("runtime mutation does not match the approved Catalog spec")
+    try:
+        store.assert_approved_deployment(
+            transaction_id=provided,
+            catalog_spec_sha256=catalog_spec_sha256,
+            catalog_id=catalog_id,
+            rollout_subject=rollout_subject,
+            action_ordinal=action_ordinal,
+            action_kind=action_kind,
+            inherited_locks=True,
+        )
+    except RecoveryError as error:
+        raise SystemExit(str(error)) from error
 PY
   then
     return 1

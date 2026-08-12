@@ -12,7 +12,8 @@ from typing import Any
 from .catalog import CatalogError, load_catalog
 from .paths import ProjectPaths
 from .result import ConfigError
-from .transactions import TERMINAL_STATES
+from .rollout import RollbackStore, RollbackStoreError
+from .transactions import TERMINAL_STATES, TransactionStore
 
 
 PROTECTED_SUFFIXES = {".gguf", ".env", ".json"}
@@ -31,14 +32,38 @@ def inventory(paths: ProjectPaths) -> dict[str, Any]:
         root = paths.root / name
         files = [item for item in root.rglob("*") if item.is_file()] if root.exists() else []
         categories[name] = {"files": len(files), "bytes": sum(_size(item) for item in files)}
-    protected: list[str] = []
+    protected: set[str] = set()
     deployment = paths.root / "profiles" / "deployment.local.env"
     if deployment.exists():
-        protected.append(str(deployment.relative_to(paths.root)))
+        protected.add(str(deployment.relative_to(paths.root)))
     transaction = paths.transaction_path
     if transaction.exists():
-        protected.append(str(transaction.relative_to(paths.root)))
-    return {"categories": categories, "protectedReferences": protected}
+        protected.add(str(transaction.relative_to(paths.root)))
+    try:
+        rollback_store = RollbackStore(paths)
+        pointer = rollback_store.read_pointer()
+        transaction_document = TransactionStore(paths).read()
+        rollback_digests: set[str] = set()
+        if pointer is not None:
+            protected.add(str(rollback_store.pointer_path.relative_to(paths.root)))
+            if pointer.active_spec_sha256 is not None:
+                rollback_digests.add(pointer.active_spec_sha256)
+        intent = (transaction_document or {}).get("rolloutIntent")
+        if isinstance(intent, dict) and isinstance(intent.get("rollbackSpecSha256"), str):
+            rollback_digests.add(intent["rollbackSpecSha256"])
+        for digest in sorted(rollback_digests):
+            spec = rollback_store.read_spec(digest)
+            protected.add(str(rollback_store.spec_path(digest).relative_to(paths.root)))
+            subject = spec.document()
+            for artifact in subject["artifacts"]:
+                protected.add(artifact["relativePath"])
+            protected.add(subject["acceptance"]["evidencePath"])
+    except RollbackStoreError as error:
+        raise ConfigError(f"cannot inventory protected rollback references: {error}") from error
+    return {
+        "categories": categories,
+        "protectedReferences": sorted(protected),
+    }
 
 
 def gc_candidates(paths: ProjectPaths, *, older_than_days: int = 14) -> list[dict[str, Any]]:

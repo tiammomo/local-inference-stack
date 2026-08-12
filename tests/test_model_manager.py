@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -123,6 +124,45 @@ def catalog_with_future_candidate(catalog: dict) -> dict:
     candidate.pop("validatedHardware", None)
     candidate_catalog["models"].append(candidate)
     return validate_catalog(candidate_catalog)
+
+
+def catalog_with_validated_role(catalog: dict, role: str) -> dict:
+    """Build a schema-valid, test-only signed model in one lifecycle role."""
+
+    validated_catalog = copy.deepcopy(catalog)
+    if role == "lts":
+        model = validated_catalog["models"][0]
+    else:
+        model = copy.deepcopy(validated_catalog["models"][0])
+        model.update(
+            {
+                "id": f"fixture-validated-{role}",
+                "displayName": f"Fixture validated {role}",
+                "purpose": f"Test-only validated {role}",
+                "modelDirectory": f"fixture-validated-{role}",
+                "servedModelId": f"fixture-validated-{role}",
+                "lifecycleRole": role,
+            }
+        )
+        validated_catalog["models"].append(model)
+    model.update(
+        {
+            "status": "validated",
+            "deploymentEligibility": {
+                "automatic": role == "lts",
+                "reason": f"test-only-validated-{role}",
+            },
+            "validationAttestation": {
+                "mode": "full",
+                "tool": "minisign",
+                "payloadSha256": "a" * 64,
+                "trustedKeySha256": "b" * 64,
+                "documentPath": f"attestations/fixture-{role}.json",
+                "signaturePath": f"attestations/fixture-{role}.minisig",
+            },
+        }
+    )
+    return validate_catalog(validated_catalog)
 
 
 class ArtifactVerificationTests(unittest.TestCase):
@@ -965,6 +1005,7 @@ class CatalogTests(unittest.TestCase):
             )
 
         self.assertFalse(payload["readyToDeploy"])
+        self.assertFalse(payload["catalogRecoveryEligible"])
         self.assertTrue(payload["selectedConfigurationMatchesCatalog"])
         self.assertEqual(
             payload["selectedConfigurationMode"], "exact-current-projection"
@@ -972,6 +1013,326 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(payload["recoveryHardwareProfileMatch"])
         self.assertTrue(payload["recoveryResourcesAvailableNow"])
         self.assertTrue(payload["readyToStartExisting"])
+
+    def test_busy_exact_host_can_admit_a_trusted_lts_replacement(self) -> None:
+        catalog = catalog_with_validated_role(self.catalog, "lts")
+        model = MODEL_MANAGER.model_by_id(catalog, "qwen35-9b-q5km")
+        assessed = host(
+            16,
+            ram=96,
+            free_vram=3,
+            name="NVIDIA GeForce RTX 5070 Ti",
+        )
+        assessed["availableRamGiB"] = 4
+        with (
+            patch.object(MODEL_MANAGER, "host_assessment", return_value=assessed),
+            patch.object(MODEL_MANAGER, "discover_host_acceptance", return_value=None),
+            patch.object(
+                MODEL_MANAGER,
+                "catalog_attestation_verification",
+                return_value={"promotionEligible": True},
+            ),
+        ):
+            payload = MODEL_MANAGER.admission_payload(
+                catalog,
+                model["id"],
+                replacement=True,
+            )
+
+        self.assertEqual(payload["mode"], "read-only-replacement-admission")
+        self.assertFalse(payload["simulatedHost"])
+        self.assertTrue(payload["fits"])
+        self.assertFalse(payload["resourceAvailableNow"])
+        self.assertFalse(payload["hostAdmissionPassed"])
+        self.assertFalse(payload["readyToDeploy"])
+        self.assertTrue(payload["replacementHostAdmissionPassed"])
+        self.assertTrue(payload["catalogDeploymentEligible"])
+        self.assertTrue(payload["readyToReplaceExisting"])
+
+    def test_replacement_rejects_wrong_tier_one_hardware(self) -> None:
+        catalog = catalog_with_validated_role(self.catalog, "lts")
+        model = MODEL_MANAGER.model_by_id(catalog, "qwen35-9b-q5km")
+        substitutions = (
+            host(16, name="NVIDIA GeForce RTX 4090"),
+            host(
+                16,
+                name="NVIDIA GeForce RTX 5070 Ti",
+                environment_kind="native-linux",
+            ),
+        )
+        for assessed in substitutions:
+            with self.subTest(
+                host=assessed["environmentKind"],
+                gpu=assessed["gpus"][0]["name"],
+            ):
+                with (
+                    patch.object(
+                        MODEL_MANAGER, "host_assessment", return_value=assessed
+                    ),
+                    patch.object(
+                        MODEL_MANAGER,
+                        "discover_host_acceptance",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        MODEL_MANAGER,
+                        "catalog_attestation_verification",
+                        return_value={"promotionEligible": True},
+                    ),
+                ):
+                    payload = MODEL_MANAGER.admission_payload(
+                        catalog,
+                        model["id"],
+                        replacement=True,
+                    )
+                self.assertFalse(payload["hardwareProfileMatch"])
+                self.assertFalse(payload["replacementHostAdmissionPassed"])
+                self.assertFalse(payload["readyToReplaceExisting"])
+
+    def test_replacement_requires_total_capacity_and_every_prerequisite(self) -> None:
+        catalog = catalog_with_validated_role(self.catalog, "lts")
+        model = MODEL_MANAGER.model_by_id(catalog, "qwen35-9b-q5km")
+        exact = host(16, name="NVIDIA GeForce RTX 5070 Ti")
+        cases: dict[str, dict] = {}
+        for name in (
+            "docker",
+            "compose",
+            "compose-configuration",
+            "nvidia-runtime",
+            "curl",
+            "python",
+            "flock",
+            "multi-gpu",
+            "vram",
+            "ram",
+            "disk",
+        ):
+            assessed = copy.deepcopy(exact)
+            if name == "docker":
+                assessed["docker"]["available"] = False
+            elif name == "compose":
+                assessed["dockerCompose"]["available"] = False
+            elif name == "compose-configuration":
+                assessed["dockerCompose"]["configurationCompatible"] = False
+            elif name == "nvidia-runtime":
+                assessed["nvidiaContainerRuntime"] = False
+            elif name == "curl":
+                assessed["curl"]["available"] = False
+            elif name == "python":
+                assessed["python"]["supported"] = False
+            elif name == "flock":
+                assessed["commands"]["flock"] = False
+            elif name == "multi-gpu":
+                assessed["gpus"].append(
+                    {
+                        "index": 1,
+                        "name": "NVIDIA GeForce RTX 5070 Ti",
+                        "vramGiB": 16,
+                        "freeVramGiB": 16,
+                        "driver": "test-driver",
+                    }
+                )
+                assessed["totalVramGiB"] = 32
+                assessed["totalFreeVramGiB"] = 32
+            elif name == "vram":
+                assessed = host(11, name="NVIDIA GeForce RTX 5070 Ti")
+            elif name == "ram":
+                assessed["ramGiB"] = 32
+                assessed["availableRamGiB"] = 32
+            else:
+                assessed["freeDiskGiB"] = 1
+            cases[name] = assessed
+
+        for name, assessed in cases.items():
+            with self.subTest(name=name):
+                with (
+                    patch.object(
+                        MODEL_MANAGER, "host_assessment", return_value=assessed
+                    ),
+                    patch.object(
+                        MODEL_MANAGER,
+                        "discover_host_acceptance",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        MODEL_MANAGER,
+                        "catalog_attestation_verification",
+                        return_value={"promotionEligible": True},
+                    ),
+                ):
+                    payload = MODEL_MANAGER.admission_payload(
+                        catalog,
+                        model["id"],
+                        replacement=True,
+                    )
+                self.assertFalse(payload["replacementHostAdmissionPassed"])
+                self.assertFalse(payload["readyToReplaceExisting"])
+
+    def test_replacement_requires_current_trusted_lts_automatic_target(self) -> None:
+        exact = host(16, name="NVIDIA GeForce RTX 5070 Ti")
+        cases = []
+
+        provisional = copy.deepcopy(self.catalog)
+        cases.append(("provisional", provisional, provisional["models"][0], True))
+
+        unsigned = catalog_with_validated_role(self.catalog, "lts")
+        cases.append(
+            (
+                "missing-trusted-signature",
+                unsigned,
+                unsigned["models"][0],
+                False,
+            )
+        )
+
+        manual = catalog_with_validated_role(self.catalog, "lts")
+        manual["models"][0]["deploymentEligibility"]["automatic"] = False
+        validate_catalog(manual)
+        cases.append(("manual-lts", manual, manual["models"][0], True))
+
+        for role in ("candidate", "rollback"):
+            catalog = catalog_with_validated_role(self.catalog, role)
+            model = MODEL_MANAGER.model_by_id(
+                catalog, f"fixture-validated-{role}"
+            )
+            cases.append((role, catalog, model, True))
+
+        for name, catalog, model, signature_valid in cases:
+            with self.subTest(name=name):
+                verification = (
+                    {"promotionEligible": True} if signature_valid else None
+                )
+                with (
+                    patch.object(MODEL_MANAGER, "host_assessment", return_value=exact),
+                    patch.object(
+                        MODEL_MANAGER,
+                        "discover_host_acceptance",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        MODEL_MANAGER,
+                        "catalog_attestation_verification",
+                        return_value=verification,
+                    ),
+                ):
+                    payload = MODEL_MANAGER.admission_payload(
+                        catalog,
+                        model["id"],
+                        replacement=True,
+                    )
+                self.assertFalse(payload["catalogDeploymentEligible"])
+                self.assertFalse(payload["readyToReplaceExisting"])
+
+    def test_validated_rollback_source_is_catalog_recovery_eligible(self) -> None:
+        catalog = catalog_with_validated_role(self.catalog, "rollback")
+        model = MODEL_MANAGER.model_by_id(
+            catalog, "fixture-validated-rollback"
+        )
+        exact = host(16, name="NVIDIA GeForce RTX 5070 Ti")
+        with (
+            patch.object(MODEL_MANAGER, "host_assessment", return_value=exact),
+            patch.object(MODEL_MANAGER, "LOCAL_PROFILE", Path("/private/selection")),
+            patch.object(MODEL_MANAGER.Path, "is_file", return_value=True),
+            patch.object(MODEL_MANAGER, "selected_model", return_value=model),
+            patch.object(
+                MODEL_MANAGER,
+                "deployment_values",
+                return_value=MODEL_MANAGER.deployment_environment(model),
+            ),
+            patch.object(MODEL_MANAGER, "discover_host_acceptance", return_value=None),
+            patch.object(
+                MODEL_MANAGER,
+                "catalog_attestation_verification",
+                return_value={"promotionEligible": True},
+            ),
+        ):
+            payload = MODEL_MANAGER.admission_payload(
+                catalog,
+                model["id"],
+                existing_selection=True,
+            )
+
+        self.assertTrue(payload["catalogRecoveryEligible"])
+        self.assertFalse(payload["catalogDeploymentEligible"])
+        self.assertTrue(payload["readyToStartExisting"])
+
+    def test_catalog_recovery_eligibility_requires_role_and_live_trust(self) -> None:
+        rollback_catalog = catalog_with_validated_role(self.catalog, "rollback")
+        rollback = MODEL_MANAGER.model_by_id(
+            rollback_catalog, "fixture-validated-rollback"
+        )
+        with patch.object(
+            MODEL_MANAGER,
+            "catalog_attestation_verification",
+            return_value=None,
+        ):
+            self.assertFalse(MODEL_MANAGER.catalog_recovery_eligible(rollback))
+
+        for role in ("lts", "candidate"):
+            with self.subTest(role=role):
+                catalog = catalog_with_validated_role(self.catalog, role)
+                model_id = (
+                    "qwen35-9b-q5km"
+                    if role == "lts"
+                    else "fixture-validated-candidate"
+                )
+                model = MODEL_MANAGER.model_by_id(catalog, model_id)
+                with patch.object(
+                    MODEL_MANAGER,
+                    "catalog_attestation_verification",
+                    return_value={"promotionEligible": True},
+                ):
+                    self.assertFalse(
+                        MODEL_MANAGER.catalog_recovery_eligible(model)
+                    )
+
+    def test_replacement_cli_is_mutually_exclusive_and_has_no_simulation(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "model-manager.py",
+                "admit",
+                "--model",
+                "qwen35-9b-q5km",
+                "--replacement",
+            ],
+        ):
+            args = MODEL_MANAGER.parse_args()
+        self.assertTrue(args.replacement)
+        self.assertFalse(args.existing_selection)
+
+        invalid_arguments = (
+            ("--replacement", "--existing-selection"),
+            ("--replacement", "--vram-gib", "16"),
+            ("--replacement", "--ram-gib", "96"),
+        )
+        for suffix in invalid_arguments:
+            with self.subTest(arguments=suffix):
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "model-manager.py",
+                            "admit",
+                            "--model",
+                            "qwen35-9b-q5km",
+                            *suffix,
+                        ],
+                    ),
+                    patch.object(sys, "stderr", StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    MODEL_MANAGER.parse_args()
+
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            MODEL_MANAGER.admission_payload(
+                self.catalog,
+                "qwen35-9b-q5km",
+                existing_selection=True,
+                replacement=True,
+            )
 
     def test_existing_selection_recovery_treats_current_free_capacity_as_advisory(self) -> None:
         model = MODEL_MANAGER.model_by_id(self.catalog, "qwen35-9b-q5km")

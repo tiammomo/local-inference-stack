@@ -11,6 +11,12 @@ source "$ROOT_DIR/scripts/lib/deployment.sh"
 load_deployment_env "$ROOT_DIR"
 acquire_runtime_lock "$ROOT_DIR"
 
+if [[ -n "${LOCAL_INFERENCE_RUNTIME_PULL_POLICY:-}" \
+  && -z "${QWEN_CONTROL_TRANSACTION_ID:-}" ]]; then
+  printf 'Controlled runtime pull policy requires a rollout recovery transaction.\n' >&2
+  exit 2
+fi
+
 if [[ -n "$FAILED_CONTAINER" \
   && ! "$FAILED_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
   printf 'Unsafe failed runtime container name: %s\n' "$FAILED_CONTAINER" >&2
@@ -23,6 +29,7 @@ if [[ -n "${QWEN_CONTROL_TRANSACTION_ID:-}" ]]; then
     "$QWEN_CONTROL_TRANSACTION_ID" \
     "${QWEN_ALLOW_LEGACY_RECONCILIATION:-false}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +41,8 @@ if document.get("id") != transaction_id:
     raise SystemExit("reconciliation transaction identity changed")
 schema = document.get("schemaVersion")
 state = document.get("state")
+operation = document.get("operation")
+pull_policy = os.environ.get("LOCAL_INFERENCE_RUNTIME_PULL_POLICY")
 if schema == 2 and state != "production_restoring":
     raise SystemExit(
         f"schema v2 reconciliation requires production_restoring; observed={state}"
@@ -42,6 +51,11 @@ if schema == 1 and not allow_legacy:
     raise SystemExit("legacy reconciliation requires explicit reviewed authorization")
 if schema not in {1, 2}:
     raise SystemExit(f"unsupported reconciliation transaction schema: {schema}")
+rollout_recovery = schema == 2 and operation in {"upgrade", "rollback"}
+if rollout_recovery and pull_policy != "never":
+    raise SystemExit("rollout recovery requires the controlled no-pull policy")
+if pull_policy is not None and not rollout_recovery:
+    raise SystemExit("controlled no-pull policy is not authorized for this recovery")
 PY
 fi
 

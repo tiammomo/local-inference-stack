@@ -73,6 +73,16 @@ wait_healthy() {
 apply_profile() {
   local profile="$1"
   local force_recreate="${2:-false}"
+  local pull_policy="${LOCAL_INFERENCE_RUNTIME_PULL_POLICY:-}"
+  local up_args=(up -d)
+  case "$pull_policy" in
+    "") ;;
+    never) up_args+=(--pull never) ;;
+    *)
+      printf 'Unsupported controlled runtime pull policy: %s\n' "$pull_policy" >&2
+      return 2
+      ;;
+  esac
   local profile_file="$PROFILE_DIR/$profile.env"
   if [[ ! -f "$profile_file" ]]; then
     printf 'Unknown profile: %s\n' "$profile" >&2
@@ -96,11 +106,10 @@ apply_profile() {
   fi
   compose_args+=(--env-file "$profile_file")
   if [[ "$force_recreate" == "true" ]]; then
-    run_clean_compose "$ROOT_DIR" "${compose_args[@]}" \
-      up -d --force-recreate qwen35
-  else
-    run_clean_compose "$ROOT_DIR" "${compose_args[@]}" up -d qwen35
+    up_args+=(--force-recreate)
   fi
+  up_args+=(qwen35)
+  run_clean_compose "$ROOT_DIR" "${compose_args[@]}" "${up_args[@]}"
   wait_healthy
   printf 'Activated Qwen runtime profile: %s\n' "$profile"
 }

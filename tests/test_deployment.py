@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -16,7 +17,10 @@ from local_inference_stack.deployment import (  # noqa: E402
     CatalogDeploymentSpec,
     DeploymentSpecError,
     build_deployment_plan,
+    build_rollback_rollout_plan,
+    build_upgrade_rollout_plan,
     parse_deployment_plan,
+    parse_rollout_plan,
 )
 
 
@@ -85,6 +89,85 @@ class DeploymentSpecTests(unittest.TestCase):
         document["actions"].reverse()
         with self.assertRaisesRegex(DeploymentSpecError, "out of order"):
             parse_deployment_plan(spec, document, require_full_lifecycle=True)
+
+    def test_upgrade_plan_binds_both_subjects_without_executable_text(self) -> None:
+        source_model = self.model()
+        source_model["lifecycleRole"] = "rollback"
+        source_model["deploymentEligibility"] = {
+            "automatic": False,
+            "reason": "explicit-rollback-only",
+        }
+        source = CatalogDeploymentSpec.from_catalog_model(source_model)
+        target_model = self.model()
+        target_model["id"] = "qwen35-9b-next"
+        target_model["servedModelId"] = "qwen3.5-9b-next"
+        target_model["modelDirectory"] = "qwen3.5-9b-next"
+        target = CatalogDeploymentSpec.from_catalog_model(target_model)
+        rollback_sha256 = "a" * 64
+
+        plan = build_upgrade_rollout_plan(
+            source,
+            target,
+            rollback_sha256,
+            admission_granted=True,
+        )
+        parsed = parse_rollout_plan(
+            plan.document(),
+            rollback_spec_sha256=rollback_sha256,
+            source=source,
+            target=target,
+        )
+        self.assertEqual(parsed.document(), plan.document())
+        self.assertEqual(
+            [item["ordinal"] for item in plan.document()["actions"]],
+            list(range(len(plan.actions))),
+        )
+        encoded = json.dumps(plan.document(), sort_keys=True).lower()
+        for forbidden in ("command", "argv", "shell", "url", "environment"):
+            self.assertNotIn(forbidden, encoded)
+
+        tampered = copy.deepcopy(plan.document())
+        tampered["actions"][0]["catalogId"] = target.catalog_id
+        with self.assertRaisesRegex(DeploymentSpecError, "immutable subjects"):
+            parse_rollout_plan(
+                tampered,
+                rollback_spec_sha256=rollback_sha256,
+                source=source,
+                target=target,
+            )
+
+    def test_rollback_plan_is_one_shot_and_exact(self) -> None:
+        anchor = CatalogDeploymentSpec.from_catalog_model(self.model())
+        current_model = self.model()
+        current_model["id"] = "qwen35-9b-next"
+        current_model["servedModelId"] = "qwen3.5-9b-next"
+        current_model["modelDirectory"] = "qwen3.5-9b-next"
+        current = CatalogDeploymentSpec.from_catalog_model(current_model)
+        plan = build_rollback_rollout_plan(
+            current,
+            anchor,
+            "b" * 64,
+            admission_granted=True,
+        )
+        self.assertEqual(
+            [item["kind"] for item in plan.document()["actions"]],
+            [
+                "stop-source",
+                "activate-target",
+                "start-target",
+                "target-quick",
+                "clear-rollback",
+            ],
+        )
+        self.assertEqual(
+            parse_rollout_plan(
+                plan.document(),
+                rollback_spec_sha256="b" * 64,
+                source=current,
+                target=anchor,
+            ).sha256,
+            plan.sha256,
+        )
 
 
 if __name__ == "__main__":

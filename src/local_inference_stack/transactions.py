@@ -12,12 +12,17 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .deployment import (
     CatalogDeploymentSpec,
     DeploymentSpecError,
     parse_approved_deployment,
+)
+from .materials import (
+    canonical_bytes,
+    canonical_sha256,
+    cleanup_interrupted_noreplace_link_at,
 )
 from .paths import ProjectPaths
 from .result import RecoveryError
@@ -103,6 +108,59 @@ LEGACY_STATES = {
 }
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 MAX_TRANSACTION_BYTES = 4 * 1024 * 1024
+ROLLOUT_OPERATIONS = frozenset({"upgrade", "rollback"})
+CATALOG_BOUND_OPERATIONS = frozenset({"deploy", *ROLLOUT_OPERATIONS})
+ROLLOUT_INTENT_POLICY_ID = (
+    "local-inference-stack/transaction-rollout-intent-v1"
+)
+ROLLOUT_INTENT_KEYS = frozenset(
+    {
+        "policyId",
+        "rollbackSpecSha256",
+        "sourceCatalogSpecSha256",
+        "targetCatalogSpecSha256",
+        "rolloutPlan",
+        "rolloutPlanSha256",
+        "previousRollbackPointer",
+    }
+)
+ROLLOUT_PLAN_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "operation",
+        "rollbackSpecSha256",
+        "sourceCatalogSpecSha256",
+        "targetCatalogSpecSha256",
+        "requiredAcceptanceTier",
+        "requiresApproval",
+        "actions",
+    }
+)
+ROLLOUT_ACTION_KEYS = frozenset(
+    {"ordinal", "kind", "subject", "catalogId"}
+)
+ROLLOUT_ACTION_RESULT_KEYS = frozenset(
+    {
+        "ordinal",
+        "kind",
+        "subject",
+        "catalogId",
+        "resultSha256",
+        "completedAt",
+    }
+)
+ROLLOUT_ACTION_SUBJECTS = {
+    "source-quick": "source",
+    "fetch-target-artifact": "target",
+    "stop-source": "source",
+    "activate-target": "target",
+    "start-target": "target",
+    "target-quick": "target",
+    "publish-rollback": "source",
+    "clear-rollback": "target",
+}
+ROLLOUT_RECOVERY_STATES = frozenset({"recovery_required", "production_restoring"})
+_SHA256_CHARACTERS = frozenset("0123456789abcdef")
 
 
 def _boot_id() -> str:
@@ -175,6 +233,266 @@ def is_terminal(document: dict[str, Any]) -> bool:
     return schema == SCHEMA_VERSION and state in TERMINAL_STATES
 
 
+def _is_sha256(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and set(value).issubset(_SHA256_CHARACTERS)
+    )
+
+
+def _canonical_clone(value: Any, *, label: str) -> Any:
+    try:
+        return json.loads(canonical_bytes(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RecoveryError(f"{label} is not canonical JSON data") from error
+
+
+def _validate_rollout_plan(
+    value: Any,
+    *,
+    operation: str,
+    target: str,
+    rollback_spec_sha256: str,
+    source_catalog_spec_sha256: str,
+    target_catalog_spec_sha256: str,
+    approved_spec: CatalogDeploymentSpec,
+) -> dict[str, Any]:
+    plan = _canonical_clone(value, label="rollout plan")
+    if not isinstance(plan, dict) or set(plan) != ROLLOUT_PLAN_KEYS:
+        raise RecoveryError("rollout plan has an invalid shape")
+    if (
+        not isinstance(plan.get("schemaVersion"), int)
+        or isinstance(plan.get("schemaVersion"), bool)
+        or plan.get("schemaVersion") != 1
+        or plan.get("operation") != operation
+        or plan.get("rollbackSpecSha256") != rollback_spec_sha256
+        or plan.get("sourceCatalogSpecSha256")
+        != source_catalog_spec_sha256
+        or plan.get("targetCatalogSpecSha256")
+        != target_catalog_spec_sha256
+        # Rollout-plan v1 has a typed quick action but no full-qualification
+        # action.  Refuse to persist a stronger label than the actions prove.
+        or plan.get("requiredAcceptanceTier") != "quick"
+        or plan.get("requiresApproval") is not True
+    ):
+        raise RecoveryError("rollout plan does not match its persisted intent")
+    if (
+        target != approved_spec.catalog_id
+        or target_catalog_spec_sha256 != approved_spec.sha256
+        or source_catalog_spec_sha256 == target_catalog_spec_sha256
+    ):
+        raise RecoveryError(
+            "rollout source, target, and approved Catalog spec are inconsistent"
+        )
+
+    actions = plan.get("actions")
+    if not isinstance(actions, list) or not actions or len(actions) > 128:
+        raise RecoveryError("rollout plan must contain a bounded action sequence")
+    source_ids: set[str] = set()
+    target_artifacts: list[str] = []
+    for ordinal, action in enumerate(actions):
+        if not isinstance(action, dict):
+            raise RecoveryError("rollout action must be an object")
+        kind = action.get("kind")
+        expected_keys = (
+            ROLLOUT_ACTION_KEYS | {"artifactSha256"}
+            if kind == "fetch-target-artifact"
+            else ROLLOUT_ACTION_KEYS
+        )
+        expected_subject = ROLLOUT_ACTION_SUBJECTS.get(kind)
+        catalog_id = action.get("catalogId")
+        if (
+            set(action) != expected_keys
+            or not isinstance(action.get("ordinal"), int)
+            or isinstance(action.get("ordinal"), bool)
+            or action.get("ordinal") != ordinal
+            or expected_subject is None
+            or action.get("subject") != expected_subject
+            or not isinstance(catalog_id, str)
+            or not catalog_id
+            or len(catalog_id) > 128
+            or any(
+                character
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                for character in catalog_id
+            )
+        ):
+            raise RecoveryError("rollout action identity or order is invalid")
+        if expected_subject == "target":
+            if catalog_id != approved_spec.catalog_id:
+                raise RecoveryError(
+                    "rollout target action does not match the approved Catalog spec"
+                )
+        else:
+            source_ids.add(catalog_id)
+        if kind == "fetch-target-artifact":
+            artifact_sha256 = action.get("artifactSha256")
+            if not _is_sha256(artifact_sha256):
+                raise RecoveryError("rollout artifact SHA256 is invalid")
+            target_artifacts.append(artifact_sha256)
+    if len(source_ids) != 1 or approved_spec.catalog_id in source_ids:
+        raise RecoveryError("rollout source Catalog identity is ambiguous")
+
+    required_artifacts = [
+        artifact.sha256 for artifact in approved_spec.artifacts if artifact.required
+    ]
+    if operation == "upgrade":
+        expected_kinds = (
+            ["source-quick"]
+            + ["fetch-target-artifact"] * len(required_artifacts)
+            + [
+                "stop-source",
+                "activate-target",
+                "start-target",
+                "target-quick",
+                "publish-rollback",
+            ]
+        )
+        if target_artifacts != required_artifacts:
+            raise RecoveryError(
+                "upgrade plan does not bind every required target artifact exactly once"
+            )
+    elif operation == "rollback":
+        expected_kinds = [
+            "stop-source",
+            "activate-target",
+            "start-target",
+            "target-quick",
+            "clear-rollback",
+        ]
+        if target_artifacts:
+            raise RecoveryError("rollback plan cannot authorize artifact acquisition")
+    else:
+        raise RecoveryError("rollout operation is unsupported")
+    if [action["kind"] for action in actions] != expected_kinds:
+        raise RecoveryError("rollout action sequence is not the approved lifecycle")
+    return plan
+
+
+def _validate_rollout_intent(
+    value: Any,
+    *,
+    operation: str,
+    target: str,
+    approved_spec: CatalogDeploymentSpec,
+) -> dict[str, Any]:
+    intent = _canonical_clone(value, label="rollout intent")
+    if not isinstance(intent, dict) or set(intent) != ROLLOUT_INTENT_KEYS:
+        raise RecoveryError("rollout intent has an invalid shape")
+    rollback_spec_sha256 = intent.get("rollbackSpecSha256")
+    source_catalog_spec_sha256 = intent.get("sourceCatalogSpecSha256")
+    target_catalog_spec_sha256 = intent.get("targetCatalogSpecSha256")
+    if (
+        intent.get("policyId") != ROLLOUT_INTENT_POLICY_ID
+        or not _is_sha256(rollback_spec_sha256)
+        or not _is_sha256(source_catalog_spec_sha256)
+        or not _is_sha256(target_catalog_spec_sha256)
+        or not _is_sha256(intent.get("rolloutPlanSha256"))
+    ):
+        raise RecoveryError("rollout intent has an invalid policy or digest")
+    plan = _validate_rollout_plan(
+        intent.get("rolloutPlan"),
+        operation=operation,
+        target=target,
+        rollback_spec_sha256=rollback_spec_sha256,
+        source_catalog_spec_sha256=source_catalog_spec_sha256,
+        target_catalog_spec_sha256=target_catalog_spec_sha256,
+        approved_spec=approved_spec,
+    )
+    if canonical_sha256(plan) != intent["rolloutPlanSha256"]:
+        raise RecoveryError("rollout plan digest does not match its document")
+
+    previous_pointer = intent.get("previousRollbackPointer")
+    if previous_pointer is not None:
+        from .rollout import RollbackPointer, RollbackSpecError
+
+        try:
+            parsed_pointer = RollbackPointer.from_document(previous_pointer)
+        except RollbackSpecError as error:
+            raise RecoveryError(
+                f"previous rollback pointer is invalid: {error}"
+            ) from error
+        if (
+            operation == "rollback"
+            and parsed_pointer.active_spec_sha256 != rollback_spec_sha256
+        ):
+            raise RecoveryError(
+                "rollback intent does not match the active rollback pointer"
+            )
+    elif operation == "rollback":
+        raise RecoveryError("rollback intent requires an active rollback pointer")
+    intent["rolloutPlan"] = plan
+    return intent
+
+
+def _rollout_intent(
+    document: dict[str, Any], approved_spec: CatalogDeploymentSpec | None = None
+) -> dict[str, Any] | None:
+    value = document.get("rolloutIntent")
+    operation = document.get("operation")
+    if value is None:
+        if operation in ROLLOUT_OPERATIONS:
+            raise RecoveryError("rollout transaction has no persisted rollout intent")
+        if "rolloutActionOrdinal" in document or "rolloutActionResults" in document:
+            raise RecoveryError("non-rollout transaction has rollout progress fields")
+        return None
+    if operation not in ROLLOUT_OPERATIONS:
+        raise RecoveryError("only upgrade or rollback may persist a rollout intent")
+    if approved_spec is None:
+        approved_spec = _approved_deployment(document)
+    if approved_spec is None:
+        raise RecoveryError("rollout transaction has no approved target Catalog spec")
+    return _validate_rollout_intent(
+        value,
+        operation=operation,
+        target=document.get("target"),
+        approved_spec=approved_spec,
+    )
+
+
+def _validate_rollout_progress(
+    document: dict[str, Any], intent: dict[str, Any] | None
+) -> None:
+    if intent is None:
+        return
+    actions = intent["rolloutPlan"]["actions"]
+    ordinal = document.get("rolloutActionOrdinal")
+    results = document.get("rolloutActionResults")
+    if (
+        not isinstance(ordinal, int)
+        or isinstance(ordinal, bool)
+        or ordinal < 0
+        or ordinal > len(actions)
+        or not isinstance(results, list)
+        or len(results) != ordinal
+    ):
+        raise RecoveryError("rollout action progress is invalid")
+    for expected_ordinal, result in enumerate(results):
+        action = actions[expected_ordinal]
+        if (
+            not isinstance(result, dict)
+            or set(result) != ROLLOUT_ACTION_RESULT_KEYS
+            or not isinstance(result.get("ordinal"), int)
+            or isinstance(result.get("ordinal"), bool)
+            or result.get("ordinal") != expected_ordinal
+            or result.get("kind") != action["kind"]
+            or result.get("subject") != action["subject"]
+            or result.get("catalogId") != action["catalogId"]
+            or not _is_sha256(result.get("resultSha256"))
+            or not isinstance(result.get("completedAt"), str)
+            or not result["completedAt"]
+        ):
+            raise RecoveryError("rollout action result journal is invalid")
+    if (
+        document.get("state") in {"completed", "superseded-verified"}
+        and ordinal != len(actions)
+    ):
+        raise RecoveryError(
+            "rollout transaction became successful-terminal before all actions completed"
+        )
+
+
 def _approved_deployment(document: dict[str, Any]) -> CatalogDeploymentSpec | None:
     spec_value = document.get("approvedCatalogSpec")
     digest_value = document.get("approvedCatalogSpecSha256")
@@ -190,7 +508,10 @@ def _approved_deployment(document: dict[str, Any]) -> CatalogDeploymentSpec | No
         )
     except DeploymentSpecError as error:
         raise RecoveryError(f"transaction has an invalid approved Catalog spec: {error}") from error
-    if document.get("operation") != "deploy" or document.get("target") != spec.catalog_id:
+    if (
+        document.get("operation") not in CATALOG_BOUND_OPERATIONS
+        or document.get("target") != spec.catalog_id
+    ):
         raise RecoveryError(
             "transaction approved Catalog spec does not match its operation and target"
         )
@@ -206,7 +527,9 @@ def _require_approved_deployment(
 ) -> CatalogDeploymentSpec:
     spec = _approved_deployment(document)
     if spec is None:
-        raise RecoveryError("deploy transaction has no persisted approved Catalog spec")
+        raise RecoveryError(
+            "Catalog-bound transaction has no persisted approved Catalog spec"
+        )
     if spec.sha256 != catalog_spec_sha256 or spec.catalog_id != catalog_id:
         raise RecoveryError(
             "runtime mutation does not match the transaction's approved Catalog spec"
@@ -222,6 +545,92 @@ def _require_approved_deployment(
                 "runtime mutation artifact does not match exactly one approved artifact"
             )
     return spec
+
+
+def _rollout_binding_from_environment(
+    rollout_subject: str | None,
+    action_ordinal: int | None,
+    action_kind: str | None,
+) -> tuple[str | None, int | None, str | None]:
+    if rollout_subject is None:
+        rollout_subject = os.environ.get("LOCAL_INFERENCE_ROLLOUT_SUBJECT")
+    if action_ordinal is None:
+        encoded_ordinal = os.environ.get("LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL")
+        if encoded_ordinal is not None:
+            if (
+                not encoded_ordinal
+                or not encoded_ordinal.isascii()
+                or not encoded_ordinal.isdecimal()
+                or (len(encoded_ordinal) > 1 and encoded_ordinal.startswith("0"))
+            ):
+                raise RecoveryError(
+                    "rollout action ordinal must be a decimal integer"
+                )
+            action_ordinal = int(encoded_ordinal)
+    if action_kind is None:
+        action_kind = os.environ.get("LOCAL_INFERENCE_ROLLOUT_ACTION_KIND")
+    return rollout_subject, action_ordinal, action_kind
+
+
+def _require_rollout_action(
+    document: dict[str, Any],
+    *,
+    catalog_spec_sha256: str,
+    catalog_id: str,
+    rollout_subject: str | None,
+    action_ordinal: int | None,
+    action_kind: str | None,
+    artifact_sha256: str | None = None,
+) -> CatalogDeploymentSpec:
+    if document.get("state") in ROLLOUT_RECOVERY_STATES:
+        raise RecoveryError(
+            "a recovering rollout has no pending action authority"
+        )
+    approved_spec = _approved_deployment(document)
+    intent = _rollout_intent(document, approved_spec)
+    if approved_spec is None or intent is None:
+        raise RecoveryError("rollout transaction authority is incomplete")
+    rollout_subject, action_ordinal, action_kind = _rollout_binding_from_environment(
+        rollout_subject, action_ordinal, action_kind
+    )
+    if rollout_subject not in {"source", "target"}:
+        raise RecoveryError("rollout subject must be supplied as source or target")
+    if (
+        not isinstance(action_ordinal, int)
+        or isinstance(action_ordinal, bool)
+        or action_ordinal < 0
+    ):
+        raise RecoveryError("rollout action ordinal must be supplied")
+    current_ordinal = document.get("rolloutActionOrdinal")
+    actions = intent["rolloutPlan"]["actions"]
+    if action_ordinal != current_ordinal or action_ordinal >= len(actions):
+        raise RecoveryError(
+            "rollout action ordinal does not identify the next pending action"
+        )
+    action = actions[action_ordinal]
+    if (
+        action["kind"] != action_kind
+        or action["subject"] != rollout_subject
+        or action["catalogId"] != catalog_id
+        or intent[f"{rollout_subject}CatalogSpecSha256"]
+        != catalog_spec_sha256
+    ):
+        raise RecoveryError(
+            "runtime mutation does not match the pending rollout action subject"
+        )
+    expected_artifact = action.get("artifactSha256")
+    if expected_artifact != artifact_sha256:
+        raise RecoveryError(
+            "runtime mutation artifact does not match the pending rollout action"
+        )
+    if rollout_subject == "target":
+        return _require_approved_deployment(
+            document,
+            catalog_spec_sha256=catalog_spec_sha256,
+            catalog_id=catalog_id,
+            artifact_sha256=artifact_sha256,
+        )
+    return approved_spec
 
 
 def recovery_original_is_safe(original: Any) -> bool:
@@ -423,6 +832,7 @@ def _atomic_json_noreplace(
             raise RecoveryError(
                 "transaction archive directory is not private and current-user-owned"
             )
+        cleanup_interrupted_noreplace_link_at(directory_descriptor, path.name)
         descriptor = os.open(
             temporary_name,
             os.O_WRONLY
@@ -672,6 +1082,9 @@ class TransactionStore:
         catalog_spec_sha256: str | None = None,
         catalog_id: str | None = None,
         artifact_sha256: str | None = None,
+        rollout_subject: str | None = None,
+        action_ordinal: int | None = None,
+        action_kind: str | None = None,
     ) -> Iterator[None]:
         """Serialize a runtime mutation and reject unrelated active transactions.
 
@@ -712,28 +1125,50 @@ class TransactionStore:
                                 "state": document.get("state"),
                             },
                         )
-                    deployment_binding_required = bool(
+                    operation = document.get("operation")
+                    catalog_binding_required = bool(
                         document.get("schemaVersion") == SCHEMA_VERSION
-                        and document.get("operation") == "deploy"
-                        and document.get("state")
-                        in {"planned", "deploying", "accepting"}
+                        and operation in CATALOG_BOUND_OPERATIONS
+                        and document.get("state") not in ROLLOUT_RECOVERY_STATES
                     )
                     if (
-                        deployment_binding_required
+                        catalog_binding_required
                         or catalog_spec_sha256 is not None
                         or catalog_id is not None
                         or artifact_sha256 is not None
+                        or rollout_subject is not None
+                        or action_ordinal is not None
+                        or action_kind is not None
                     ):
                         if catalog_spec_sha256 is None or catalog_id is None:
                             raise RecoveryError(
                                 "deployment digest and Catalog ID must be supplied together"
                             )
-                        _require_approved_deployment(
-                            document,
-                            catalog_spec_sha256=catalog_spec_sha256,
-                            catalog_id=catalog_id,
-                            artifact_sha256=artifact_sha256,
-                        )
+                        if operation in ROLLOUT_OPERATIONS:
+                            _require_rollout_action(
+                                document,
+                                catalog_spec_sha256=catalog_spec_sha256,
+                                catalog_id=catalog_id,
+                                artifact_sha256=artifact_sha256,
+                                rollout_subject=rollout_subject,
+                                action_ordinal=action_ordinal,
+                                action_kind=action_kind,
+                            )
+                        else:
+                            if (
+                                rollout_subject is not None
+                                or action_ordinal is not None
+                                or action_kind is not None
+                            ):
+                                raise RecoveryError(
+                                    "non-rollout mutation cannot carry rollout authority"
+                                )
+                            _require_approved_deployment(
+                                document,
+                                catalog_spec_sha256=catalog_spec_sha256,
+                                catalog_id=catalog_id,
+                                artifact_sha256=artifact_sha256,
+                            )
                 elif provided:
                     raise RecoveryError(
                         "the authorized control transaction is missing or already terminal"
@@ -770,7 +1205,9 @@ class TransactionStore:
         ):
             raise RecoveryError("active transaction state has no verifiable process owner")
         if document["schemaVersion"] == SCHEMA_VERSION:
-            _approved_deployment(document)
+            approved_spec = _approved_deployment(document)
+            intent = _rollout_intent(document, approved_spec)
+            _validate_rollout_progress(document, intent)
 
     @staticmethod
     def initiator_status(document: dict[str, Any]) -> dict[str, Any]:
@@ -823,51 +1260,146 @@ class TransactionStore:
         original: dict[str, Any],
         *,
         approved_catalog_spec: dict[str, Any] | None = None,
+        rollout_intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Runtime-facing wrappers acquire runtime.lock before transaction.lock.
         # Keep the same global order here so transaction publication cannot
         # deadlock with a concurrent select/start/stop operation.
         with self.runtime_boundary():
             with self.locked():
-                existing = self.read()
-                if existing and not is_terminal(existing):
+                self._prepare_begin_locked()
+                return self._publish_begin_locked(
+                    operation,
+                    target,
+                    original,
+                    approved_catalog_spec=approved_catalog_spec,
+                    rollout_intent=rollout_intent,
+                )
+
+    def begin_rollout(
+        self,
+        operation: str,
+        target: str,
+        capture: Callable[
+            [str, str], tuple[dict[str, Any], dict[str, Any]]
+        ],
+        *,
+        approved_catalog_spec: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Capture and publish rollout authority inside one global lock boundary.
+
+        The callback may inspect the source runtime and publish its immutable
+        rollback object.  It runs only after an earlier active transaction has
+        been excluded, while both runtime and transaction locks remain held.
+        """
+
+        if operation not in ROLLOUT_OPERATIONS:
+            raise RecoveryError("begin_rollout only accepts upgrade or rollback")
+        if not callable(capture):
+            raise RecoveryError("rollout capture must be callable")
+        try:
+            approved_target = parse_approved_deployment(approved_catalog_spec)
+        except DeploymentSpecError as error:
+            raise RecoveryError(
+                f"rollout target has an invalid approved Catalog spec: {error}"
+            ) from error
+        if approved_target.catalog_id != target:
+            raise RecoveryError(
+                "rollout target does not match its approved Catalog spec"
+            )
+        frozen_approval = approved_target.approval_document()
+        with self.runtime_boundary():
+            with self.locked():
+                self._prepare_begin_locked()
+                transaction_id = str(uuid.uuid4())
+                created_at = utc_now()
+                captured = capture(transaction_id, created_at)
+                if not isinstance(captured, tuple) or len(captured) != 2:
                     raise RecoveryError(
-                        "an unfinished runtime transaction must be reconciled first",
-                        facts={
-                            "transactionId": existing["id"],
-                            "schemaVersion": existing["schemaVersion"],
-                            "state": existing["state"],
-                        },
+                        "rollout capture must return (original, rollout_intent)"
                     )
-                if existing:
-                    self._archive_terminal(existing)
-                now = utc_now()
-                document = {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "id": str(uuid.uuid4()),
-                    "operation": operation,
-                    "target": target,
-                    "state": "planned",
-                    "createdAt": now,
-                    "updatedAt": now,
-                    "owner": transaction_owner(),
-                    "original": original,
-                    "history": [{"state": "planned", "at": now}],
-                    "recovery": {
-                        "action": "restore-production",
-                        "automatic": recovery_original_is_safe(original),
-                    },
-                }
-                if approved_catalog_spec is not None:
-                    document["approvedCatalogSpecSha256"] = approved_catalog_spec.get(
-                        "approvedCatalogSpecSha256"
+                original, rollout_intent = captured
+                if not isinstance(original, dict) or not isinstance(
+                    rollout_intent, dict
+                ):
+                    raise RecoveryError(
+                        "rollout capture returned an invalid transaction document"
                     )
-                    document["approvedCatalogSpec"] = approved_catalog_spec.get(
-                        "catalogSpec"
-                    )
-                    _approved_deployment(document)
-                _atomic_json(self.path, document)
-                return document
+                return self._publish_begin_locked(
+                    operation,
+                    target,
+                    original,
+                    approved_catalog_spec=frozen_approval,
+                    rollout_intent=rollout_intent,
+                    transaction_id=transaction_id,
+                    created_at=created_at,
+                )
+
+    def _prepare_begin_locked(self) -> None:
+        existing = self.read()
+        if existing and not is_terminal(existing):
+            raise RecoveryError(
+                "an unfinished runtime transaction must be reconciled first",
+                facts={
+                    "transactionId": existing["id"],
+                    "schemaVersion": existing["schemaVersion"],
+                    "state": existing["state"],
+                },
+            )
+        if existing:
+            self._archive_terminal(existing)
+
+    def _publish_begin_locked(
+        self,
+        operation: str,
+        target: str,
+        original: dict[str, Any],
+        *,
+        approved_catalog_spec: dict[str, Any] | None,
+        rollout_intent: dict[str, Any] | None,
+        transaction_id: str | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        now = created_at or utc_now()
+        identifier = transaction_id or str(uuid.uuid4())
+        document = {
+            "schemaVersion": SCHEMA_VERSION,
+            "id": identifier,
+            "operation": operation,
+            "target": target,
+            "state": "planned",
+            "createdAt": now,
+            "updatedAt": now,
+            "owner": transaction_owner(),
+            "original": original,
+            "history": [{"state": "planned", "at": now}],
+            "recovery": {
+                "action": "restore-production",
+                "automatic": recovery_original_is_safe(original),
+            },
+        }
+        if approved_catalog_spec is not None:
+            try:
+                approved_spec = parse_approved_deployment(approved_catalog_spec)
+            except DeploymentSpecError as error:
+                raise RecoveryError(
+                    f"transaction has an invalid approved Catalog spec: {error}"
+                ) from error
+            document["approvedCatalogSpecSha256"] = approved_spec.sha256
+            document["approvedCatalogSpec"] = approved_spec.document()
+        if rollout_intent is not None:
+            document["rolloutIntent"] = rollout_intent
+            document["rolloutActionOrdinal"] = 0
+            document["rolloutActionResults"] = []
+        approved_spec = _approved_deployment(document)
+        intent = _rollout_intent(document, approved_spec)
+        if intent is not None:
+            # Persist the validated deep clone, never the caller-owned object
+            # that could be mutated after validation but before serialization.
+            document["rolloutIntent"] = intent
+        _validate_rollout_progress(document, intent)
+        _atomic_json(self.path, document)
+        return document
 
     def assert_approved_deployment(
         self,
@@ -876,9 +1408,12 @@ class TransactionStore:
         catalog_spec_sha256: str,
         catalog_id: str,
         artifact_sha256: str | None = None,
+        rollout_subject: str | None = None,
+        action_ordinal: int | None = None,
+        action_kind: str | None = None,
         inherited_locks: bool = False,
     ) -> CatalogDeploymentSpec:
-        """Bind a child action to the still-active persisted deploy approval."""
+        """Bind a child action to its still-active persisted Catalog authority."""
 
         try:
             if str(uuid.UUID(transaction_id)) != transaction_id:
@@ -914,6 +1449,24 @@ class TransactionStore:
             ):
                 raise RecoveryError(
                     "approved Catalog deployment transaction is missing, changed, or terminal"
+                )
+            if document.get("operation") in ROLLOUT_OPERATIONS:
+                return _require_rollout_action(
+                    document,
+                    catalog_spec_sha256=catalog_spec_sha256,
+                    catalog_id=catalog_id,
+                    artifact_sha256=artifact_sha256,
+                    rollout_subject=rollout_subject,
+                    action_ordinal=action_ordinal,
+                    action_kind=action_kind,
+                )
+            if (
+                rollout_subject is not None
+                or action_ordinal is not None
+                or action_kind is not None
+            ):
+                raise RecoveryError(
+                    "non-rollout deployment cannot carry rollout authority"
                 )
             return _require_approved_deployment(
                 document,
@@ -966,6 +1519,8 @@ class TransactionStore:
         target_state: str,
         *,
         expected_id: str,
+        expected_state: str | None = None,
+        expected_action_ordinal: int | None = None,
         detail: str | None = None,
     ) -> dict[str, Any]:
         with self.locked():
@@ -985,6 +1540,44 @@ class TransactionStore:
                     "legacy transaction state is read-only; use explicit reconciliation"
                 )
             current = document["state"]
+            if expected_state is not None and current != expected_state:
+                raise RecoveryError(
+                    "transaction state changed before the requested transition"
+                )
+            intent = _rollout_intent(document, _approved_deployment(document))
+            if expected_action_ordinal is not None:
+                if intent is None:
+                    raise RecoveryError(
+                        "non-rollout transaction has no action ordinal to compare"
+                    )
+                if (
+                    not isinstance(expected_action_ordinal, int)
+                    or isinstance(expected_action_ordinal, bool)
+                    or expected_action_ordinal < 0
+                    or document.get("rolloutActionOrdinal")
+                    != expected_action_ordinal
+                ):
+                    raise RecoveryError(
+                        "rollout action ordinal changed before the requested transition"
+                    )
+            if (
+                intent is not None
+                and target_state in {"completed", "superseded-verified"}
+                and document.get("rolloutActionOrdinal")
+                != len(intent["rolloutPlan"]["actions"])
+            ):
+                raise RecoveryError(
+                    "rollout transaction cannot become successful-terminal "
+                    "before all actions complete"
+                )
+            if (
+                intent is not None
+                and target_state == "failed-restored"
+                and (not isinstance(detail, str) or not detail.strip())
+            ):
+                raise RecoveryError(
+                    "failed-restored rollout transition requires recovery verification detail"
+                )
             if target_state not in ALLOWED_TRANSITIONS[current]:
                 raise RecoveryError(f"invalid transaction transition: {current} -> {target_state}")
             now = utc_now()
@@ -997,6 +1590,72 @@ class TransactionStore:
             _atomic_json(self.path, document)
             if is_terminal(document):
                 self._archive_terminal(document)
+            return document
+
+    def advance_rollout_action(
+        self,
+        *,
+        expected_id: str,
+        expected_state: str,
+        expected_action_ordinal: int,
+        expected_action_kind: str,
+        result_sha256: str,
+    ) -> dict[str, Any]:
+        """CAS one exact typed action result into the durable rollout journal."""
+
+        if not _is_sha256(result_sha256):
+            raise RecoveryError("rollout action result SHA256 is invalid")
+        with self.locked():
+            document = self.read()
+            if not document or document.get("id") != expected_id:
+                raise RecoveryError(
+                    "transaction identity changed before rollout action advancement"
+                )
+            if document.get("schemaVersion") != SCHEMA_VERSION or is_terminal(document):
+                raise RecoveryError("only an active v2 rollout can advance an action")
+            if document.get("state") != expected_state:
+                raise RecoveryError(
+                    "transaction state changed before rollout action advancement"
+                )
+            if document["state"] in ROLLOUT_RECOVERY_STATES:
+                raise RecoveryError(
+                    "a recovering transaction cannot advance its rollout action plan"
+                )
+            approved_spec = _approved_deployment(document)
+            intent = _rollout_intent(document, approved_spec)
+            if intent is None:
+                raise RecoveryError("transaction has no rollout action plan")
+            current_ordinal = document.get("rolloutActionOrdinal")
+            actions = intent["rolloutPlan"]["actions"]
+            if (
+                not isinstance(expected_action_ordinal, int)
+                or isinstance(expected_action_ordinal, bool)
+                or expected_action_ordinal != current_ordinal
+                or expected_action_ordinal >= len(actions)
+            ):
+                raise RecoveryError(
+                    "rollout action ordinal cannot be skipped or replayed"
+                )
+            action = actions[expected_action_ordinal]
+            if action["kind"] != expected_action_kind:
+                raise RecoveryError(
+                    "rollout action kind does not match the next pending action"
+                )
+            completed_at = utc_now()
+            document["rolloutActionResults"].append(
+                {
+                    "ordinal": expected_action_ordinal,
+                    "kind": action["kind"],
+                    "subject": action["subject"],
+                    "catalogId": action["catalogId"],
+                    "resultSha256": result_sha256,
+                    "completedAt": completed_at,
+                }
+            )
+            document["rolloutActionOrdinal"] = expected_action_ordinal + 1
+            document["updatedAt"] = completed_at
+            _validate_rollout_progress(document, intent)
+            _atomic_json(self.path, document)
             return document
 
     def resolve_legacy_failed(

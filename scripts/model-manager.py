@@ -358,6 +358,34 @@ def catalog_deployment_eligible(model: dict[str, Any] | None) -> bool:
     return catalog_attestation_verification(model) is not None
 
 
+def catalog_recovery_eligible(model: dict[str, Any] | None) -> bool:
+    """Describe whether a Catalog entry is a trusted rollback source."""
+
+    if (
+        not model
+        or model.get("status") != "validated"
+        or model.get("lifecycleRole") != "rollback"
+        or (model.get("validationAttestation") or {}).get("mode") != "full"
+    ):
+        return False
+    return catalog_attestation_verification(model) is not None
+
+
+def host_runtime_prerequisites_pass(host: dict[str, Any]) -> bool:
+    """Check the immutable/runtime prerequisites shared by admission modes."""
+
+    return bool(
+        automatic_deployment_supported(host)
+        and host["docker"]["available"]
+        and host["dockerCompose"]["available"]
+        and host["dockerCompose"].get("configurationCompatible", False)
+        and host["nvidiaContainerRuntime"]
+        and host.get("curl", {}).get("available", False)
+        and host.get("python", {}).get("supported", False)
+        and host.get("commands", {}).get("flock", False)
+    )
+
+
 def caveats(
     host: dict[str, Any],
     model: dict[str, Any] | None,
@@ -735,9 +763,14 @@ def discover_host_acceptance(
         if not evidence or evidence.get("evidenceId") != path.stem:
             continue
         if acceptance_matches_host(model, host, evidence):
+            evidence_sha256 = secure_evidence_sha256(path)
+            if evidence_sha256 is None:
+                continue
             return {
                 "status": "passed-current-configuration",
                 "evidence": str(path.relative_to(ROOT_DIR)),
+                "evidenceSha256": evidence_sha256,
+                "evidenceSelfSha256": evidence.get("selfSha256"),
                 "finishedAt": evidence.get("finishedAt"),
                 "mode": evidence.get("mode"),
             }
@@ -761,14 +794,7 @@ def plan_for_host(
     host_admitted = bool(
         hardware_fits
         and resources_available
-        and automatic_supported
-        and host["docker"]["available"]
-        and host["dockerCompose"]["available"]
-        and host["dockerCompose"].get("configurationCompatible", False)
-        and host["nvidiaContainerRuntime"]
-        and host.get("curl", {}).get("available", False)
-        and host.get("python", {}).get("supported", False)
-        and host.get("commands", {}).get("flock", False)
+        and host_runtime_prerequisites_pass(host)
         and hardware_profile_match
         and not simulation
     )
@@ -919,6 +945,14 @@ def print_plan(payload: dict[str, Any], as_json: bool) -> None:
                 "  Existing selection recovery: "
                 f"readyToStartExisting={str(payload['readyToStartExisting']).lower()}"
             )
+        if "readyToReplaceExisting" in payload:
+            print(
+                "  Existing selection replacement: "
+                "replacementHostAdmissionPassed="
+                f"{str(payload['replacementHostAdmissionPassed']).lower()}; "
+                "readyToReplaceExisting="
+                f"{str(payload['readyToReplaceExisting']).lower()}"
+            )
     else:
         print("Recommendation: none; no evidence-backed Catalog entry fits this host")
     for note in payload["caveats"]:
@@ -938,7 +972,12 @@ def admission_payload(
     model_id: str,
     *,
     existing_selection: bool = False,
+    replacement: bool = False,
 ) -> dict[str, Any]:
+    if existing_selection and replacement:
+        raise ValueError(
+            "existing-selection and replacement admission are mutually exclusive"
+        )
     args = argparse.Namespace(model=model_id)
     host = host_assessment(None, None)
     model = model_by_id(catalog, model_id)
@@ -960,17 +999,11 @@ def admission_payload(
         recovery_resources_available = resources_available_now(model, host)
         recovery_host_admitted = bool(
             fits(model, host)
-            and automatic_deployment_supported(host)
-            and host["docker"]["available"]
-            and host["dockerCompose"]["available"]
-            and host["dockerCompose"].get("configurationCompatible", False)
-            and host["nvidiaContainerRuntime"]
-            and host.get("curl", {}).get("available", False)
-            and host.get("python", {}).get("supported", False)
-            and host.get("commands", {}).get("flock", False)
+            and host_runtime_prerequisites_pass(host)
             and recovery_hardware_match
         )
         payload["mode"] = "read-only-existing-selection-admission"
+        payload["catalogRecoveryEligible"] = catalog_recovery_eligible(model)
         payload["selectedConfigurationMatchesCatalog"] = selection_matches
         payload["selectedConfigurationMode"] = selection_mode
         payload["recoveryHardwareProfileMatch"] = recovery_hardware_match
@@ -1002,6 +1035,24 @@ def admission_payload(
                 "Catalog projection on this exact recorded host; it does not "
                 "authorize download, selection, or a new deployment."
             )
+    elif replacement:
+        replacement_host_admitted = bool(
+            payload["fits"]
+            and host_runtime_prerequisites_pass(host)
+            and payload["hardwareProfileMatch"]
+            and not payload["simulatedHost"]
+        )
+        payload["mode"] = "read-only-replacement-admission"
+        payload["replacementHostAdmissionPassed"] = replacement_host_admitted
+        payload["readyToReplaceExisting"] = bool(
+            replacement_host_admitted and payload["catalogDeploymentEligible"]
+        )
+        if payload["readyToReplaceExisting"] and not payload["resourceAvailableNow"]:
+            payload["caveats"].append(
+                "Current free VRAM or RAM is advisory for an existing-selection "
+                "replacement because the old runtime is expected to stop first; "
+                "this does not authorize a side-by-side deployment."
+            )
     return payload
 
 
@@ -1015,6 +1066,38 @@ def require_deployment_admission(
         return payload
     notes = "; ".join(payload["caveats"]) or "host admission requirements are not met"
     raise SystemExit(f"{action} blocked by deployment admission: {notes}")
+
+
+def require_catalog_action_admission(
+    args: argparse.Namespace,
+    catalog: dict[str, Any],
+    model_id: str,
+    action: str,
+) -> dict[str, Any]:
+    """Apply the ordinary or explicit maintenance-window admission policy.
+
+    Replacement admission is deliberately unavailable to direct script callers:
+    it is meaningful only for one action already bound to an active typed rollout.
+    """
+
+    if not getattr(args, "replacement", False):
+        return require_deployment_admission(catalog, model_id, action)
+    if (
+        not getattr(args, "catalog_spec_sha256", None)
+        or not os.environ.get("QWEN_CONTROL_TRANSACTION_ID")
+        or os.environ.get("LOCAL_INFERENCE_ROLLOUT_SUBJECT") != "target"
+        or os.environ.get("LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL") is None
+    ):
+        raise SystemExit(
+            "replacement admission requires an active target rollout action"
+        )
+    payload = admission_payload(catalog, model_id, replacement=True)
+    if payload.get("readyToReplaceExisting") is True:
+        return payload
+    notes = "; ".join(payload.get("caveats", [])) or (
+        "replacement host admission requirements are not met"
+    )
+    raise SystemExit(f"{action} blocked by replacement admission: {notes}")
 
 
 def confirmation_required(args: argparse.Namespace, action: str) -> None:
@@ -1521,7 +1604,7 @@ def download_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
         raise SystemExit(
             "--all-artifacts cannot be combined with an approved artifact identity"
         )
-    require_deployment_admission(catalog, model["id"], "download")
+    require_catalog_action_admission(args, catalog, model["id"], "download")
     with authorized_download_boundary(
         args, model, approved_artifact
     ), exclusive_local_lock(f"download-{model['id']}"):
@@ -1631,7 +1714,7 @@ def deployment_env(model: dict[str, Any]) -> str:
 def select_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     confirmation_required(args, "select")
     model, _artifact = approved_catalog_action(args, catalog)
-    require_deployment_admission(catalog, model["id"], "select")
+    require_catalog_action_admission(args, catalog, model["id"], "select")
     store = TransactionStore(ProjectPaths(ROOT_DIR))
     try:
         boundary = store.authorized_runtime_mutation(
@@ -1832,10 +1915,22 @@ def parse_args() -> argparse.Namespace:
         help="read-only deployment admission for one reviewed catalog model",
     )
     admit_parser.add_argument("--model", required=True)
-    admit_parser.add_argument(
+    admission_mode = admit_parser.add_mutually_exclusive_group()
+    admission_mode.add_argument(
         "--existing-selection",
         action="store_true",
-        help="admit recovery of an already selected local model without authorizing a new deployment",
+        help=(
+            "admit recovery of an already selected local model without "
+            "authorizing a new deployment"
+        ),
+    )
+    admission_mode.add_argument(
+        "--replacement",
+        action="store_true",
+        help=(
+            "admit a reviewed replacement while treating current free "
+            "capacity as advisory"
+        ),
     )
     admit_parser.add_argument("--json", action="store_true")
     plan_parser = subparsers.add_parser("plan", help="read-only host assessment and recommendation")
@@ -1850,6 +1945,14 @@ def parse_args() -> argparse.Namespace:
         action_parser.add_argument(
             "--catalog-spec-sha256",
             help="bind a transactional action to its approved Catalog spec",
+        )
+        action_parser.add_argument(
+            "--replacement",
+            action="store_true",
+            help=(
+                "use reviewed single-runtime replacement admission; requires "
+                "an active typed rollout target action"
+            ),
         )
         if name == "download":
             action_parser.add_argument("--all-artifacts", action="store_true")
@@ -1885,13 +1988,20 @@ def main() -> int:
         return audit_sources(catalog, args.json)
     elif args.command == "admit":
         payload = admission_payload(
-            catalog, args.model, existing_selection=args.existing_selection
+            catalog,
+            args.model,
+            existing_selection=args.existing_selection,
+            replacement=args.replacement,
         )
         print_plan(payload, args.json)
         admitted = (
             payload.get("readyToStartExisting", False)
             if args.existing_selection
-            else payload["readyToDeploy"]
+            else (
+                payload.get("readyToReplaceExisting", False)
+                if args.replacement
+                else payload["readyToDeploy"]
+            )
         )
         return 0 if admitted else 3
     elif args.command == "plan":

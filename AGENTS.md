@@ -31,6 +31,31 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
    similarity alone is not host acceptance, and a busy running GPU may still
    make `readyToDeploy` false.
 
+## Upgrade and rollback workflow
+
+- Inspect `./stack upgrade --model CATALOG_ID` or `./stack rollback` first. The
+  commands are read-only without `--yes`; upgrade shows the admitted source,
+  target, scope, and caveats, while rollback also shows its verified pointer and
+  typed plan. Present those facts before asking for approval.
+- Only `./stack upgrade --model CATALOG_ID --yes` and `./stack rollback --yes`
+  may execute the typed maintenance-window lifecycle. Do not call internal
+  replacement flags or runtime adapters directly.
+- Rollback spec v1 is deliberately limited to
+  `same-controller-same-catalog-anchor-v1`: the same trusted WSL2 x86_64 host,
+  an exact clean controller material set, an exact current Catalog rollback
+  entry, the `latency` Profile, and already-local artifacts and image identity.
+- Rollback never downloads, pulls, checks out Git, or reconstructs an anchor
+  from mutable state. A controller, Catalog, host, evidence, artifact, Compose,
+  image, or pointer mismatch is a hard stop; restore those prerequisites under
+  a separately reviewed procedure rather than bypassing the check.
+- Upgrade and rollback run `quick --no-record` inside the transaction as a
+  service gate. That check creates no reusable host evidence, does not qualify
+  a model, and does not promote a Catalog entry.
+- The current executable Catalog contains only one provisional entry,
+  so no real upgrade pair or rollback anchor is eligible. This is expected to
+  fail closed; never manufacture an entry, pointer, evidence file, or local
+  artifact to make the command proceed.
+
 ## Safety and boundaries
 
 - Model artifacts, generated profiles, cache, logs, and secrets are local and
@@ -43,8 +68,10 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
   RTX 5070 Ti profile. Native Linux and other NVIDIA hosts remain read-only
   until qualified. For CPU, Apple Silicon, AMD, unusual multi-GPU, or shared production GPUs, stop after
   the plan and design a reviewed profile rather than forcing this Compose stack.
-- `readyToDeploy=false` or a missing typed `actionPlan` is a hard stop. Do not
-  work around free-VRAM, multi-GPU, platform, or prerequisite admission checks.
+- For a new deployment, `readyToDeploy=false` or a missing typed `actionPlan`
+  is a hard stop. Upgrade and rollback have their own typed source, replacement,
+  and anchor admission; any failed admission is equally final. Do not work
+  around free-VRAM, multi-GPU, platform, trust, or prerequisite checks.
 - Keep services loopback-bound. Do not expose port `18080` or the operations
   dashboard without adding authentication and a separate security review.
 

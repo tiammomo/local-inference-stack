@@ -64,6 +64,21 @@ curl --noproxy '*' http://127.0.0.1:18080/health
 ./scripts/acceptance-suite.sh quick
 ```
 
+### 维护窗口升级与回滚
+
+公共入口默认只读；确认准入对象、scope 与回滚计划并取得批准后才添加 `--yes`：
+
+```bash
+./stack upgrade --model CATALOG_ID
+./stack rollback
+```
+
+typed rollback 仅支持 `same-controller-same-catalog-anchor-v1`：同一主机、同一精确 controller、
+当前 Catalog 仍认可的 `latency` 锚点，以及本地 artifact/image。它不联网、不 pull、不 checkout
+Git；事务内 `quick --no-record` 只作服务门禁，不构成 qualification。当前 Catalog 只有一个
+provisional 条目，不能形成合法 validated rollback/LTS 模型对，因此真实 upgrade/rollback 按设计
+fail closed。操作和恢复细节见[升级与回滚](docs/UPGRADING.md)。
+
 完整的新机、已部署恢复和 WSL 自启流程见[首次部署](docs/GETTING_STARTED.md)与
 [运维与恢复](docs/OPERATIONS.md)。
 

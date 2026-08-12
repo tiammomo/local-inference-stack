@@ -11,6 +11,7 @@ import shlex
 import shutil
 import signal
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from . import (
     bundle,
     calibration,
     configuration,
+    catalog,
     credentials,
     health,
     migration,
@@ -31,9 +33,13 @@ from .deployment import (
     ActionKind,
     CatalogDeploymentSpec,
     DeploymentSpecError,
+    RolloutActionKind,
+    build_rollback_rollout_plan,
+    build_upgrade_rollout_plan,
     load_approved_catalog_spec,
     parse_deployment_plan,
 )
+from .materials import canonical_sha256
 from .result import (
     AdmissionError,
     CommandResult,
@@ -47,13 +53,33 @@ from .result import (
     UsageError,
 )
 from .runner import run
+from .rollout import (
+    RollbackPointer,
+    RollbackSpec,
+    RollbackSpecError,
+    RollbackStore,
+    RollbackStoreError,
+)
+from .rollout_runtime import (
+    capture_rollback_spec,
+    recovery_original as rollback_recovery_original,
+    verify_rollback_spec,
+    write_anchor_selection,
+)
 from .transactions import (
     RECOVERY_DEPLOYMENT_KEYS,
     RECOVERY_REQUIRED_DEPLOYMENT_KEYS,
     SCHEMA_VERSION as TRANSACTION_SCHEMA_VERSION,
+    ROLLOUT_INTENT_POLICY_ID,
     TransactionStore,
     recovery_original_is_safe,
 )
+
+
+RUNTIME_PULL_POLICY_ENV = "LOCAL_INFERENCE_RUNTIME_PULL_POLICY"
+RUNTIME_PULL_POLICY_NEVER = "never"
+ROLLOUT_PREFLIGHT_TRANSACTION_ID = "00000000-0000-4000-8000-000000000000"
+ROLLOUT_PREFLIGHT_CAPTURED_AT = "1970-01-01T00:00:00Z"
 
 
 class StableParser(argparse.ArgumentParser):
@@ -96,6 +122,19 @@ def parser() -> argparse.ArgumentParser:
     deploy = commands.add_parser("deploy", help="execute catalog-generated deployment steps")
     deploy.add_argument("--model")
     deploy.add_argument("--yes", action="store_true")
+
+    upgrade = commands.add_parser(
+        "upgrade",
+        help="replace production through one typed maintenance-window transaction",
+    )
+    upgrade.add_argument("--model", required=True)
+    upgrade.add_argument("--yes", action="store_true")
+
+    rollback_parser = commands.add_parser(
+        "rollback",
+        help="inspect or consume the one active immutable rollback anchor",
+    )
+    rollback_parser.add_argument("--yes", action="store_true")
 
     accept = commands.add_parser("accept", help="run a supported acceptance tier")
     accept.add_argument("tier", choices=("quick", "standard", "full"), nargs="?", default="quick")
@@ -799,6 +838,628 @@ def _deploy(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
     return CommandResult("deploy", "ok", "catalog-backed deployment and quick acceptance completed", facts={"transaction": state})
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _selected_catalog_spec(
+    paths: ProjectPaths,
+) -> tuple[CatalogDeploymentSpec, dict[str, str]]:
+    """Freeze the exact current private selection against the strict Catalog."""
+
+    from scripts.runtime_identity import deployment_values
+
+    try:
+        values = deployment_values()
+        model_id = values["QWEN_CATALOG_ID"]
+        document = catalog.load_catalog(paths.root / "catalog" / "models.json")
+        model = catalog.model_by_id(document, model_id)
+        expected = configuration.catalog_deployment_environment(model)
+        spec = CatalogDeploymentSpec.from_catalog_model(model)
+    except (OSError, KeyError, ValueError, RuntimeError, catalog.CatalogError, DeploymentSpecError) as error:
+        raise ConfigError("cannot establish the exact selected Catalog identity") from error
+    if values != expected:
+        raise ConfigError(
+            "selected deployment profile is not the exact current Catalog projection"
+        )
+    return spec, values
+
+
+def _rollout_admission(
+    paths: ProjectPaths,
+    model_id: str,
+    *,
+    mode: str,
+) -> tuple[dict[str, Any], CatalogDeploymentSpec]:
+    if mode not in {"existing-selection", "replacement"}:
+        raise ConfigError("unsupported rollout admission mode")
+    result = run(
+        [
+            "python3",
+            "scripts/model-manager.py",
+            "admit",
+            "--model",
+            model_id,
+            f"--{mode}",
+            "--json",
+        ],
+        cwd=paths.root,
+        timeout=60,
+        check=False,
+    )
+    try:
+        payload = json.loads(result.stdout)
+        spec = CatalogDeploymentSpec.from_catalog_model(payload["recommendation"])
+    except (json.JSONDecodeError, KeyError, DeploymentSpecError) as error:
+        raise ConfigError("rollout admission returned an invalid Catalog identity") from error
+    expected_mode = f"read-only-{mode}-admission"
+    ready_key = (
+        "readyToStartExisting"
+        if mode == "existing-selection"
+        else "readyToReplaceExisting"
+    )
+    if (
+        result.returncode != 0
+        or payload.get("mode") != expected_mode
+        or spec.catalog_id != model_id
+        or payload.get(ready_key) is not True
+    ):
+        raise AdmissionError(
+            f"{mode} rollout admission denied the requested Catalog subject",
+            facts={"admission": payload},
+        )
+    return payload, spec
+
+
+def _require_recovery_anchor_admission(payload: dict[str, Any]) -> None:
+    """Require a source that is already a trusted, validated rollback anchor."""
+
+    if payload.get("catalogRecoveryEligible") is not True:
+        raise AdmissionError(
+            "the selected source is not an eligible immutable rollback anchor",
+            facts={"admission": payload},
+        )
+
+
+def _rollout_intent(
+    *,
+    rollback_spec: RollbackSpec,
+    source: CatalogDeploymentSpec,
+    target: CatalogDeploymentSpec,
+    plan: Any,
+    previous_pointer: RollbackPointer | None,
+) -> dict[str, Any]:
+    return {
+        "policyId": ROLLOUT_INTENT_POLICY_ID,
+        "rollbackSpecSha256": rollback_spec.sha256,
+        "sourceCatalogSpecSha256": source.sha256,
+        "targetCatalogSpecSha256": target.sha256,
+        "rolloutPlan": plan.document(),
+        "rolloutPlanSha256": plan.sha256,
+        "previousRollbackPointer": (
+            previous_pointer.document() if previous_pointer is not None else None
+        ),
+    }
+
+
+def _rollout_environment(
+    transaction_id: str,
+    spec: CatalogDeploymentSpec,
+    *,
+    subject: str,
+    ordinal: int,
+    kind: str,
+) -> dict[str, str]:
+    return {
+        **_transaction_environment(transaction_id),
+        "LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256": spec.sha256,
+        "LOCAL_INFERENCE_ROLLOUT_SUBJECT": subject,
+        "LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL": str(ordinal),
+        "LOCAL_INFERENCE_ROLLOUT_ACTION_KIND": kind,
+    }
+
+
+def _action_result(action: Any, *, output: str = "", facts: Any = None) -> str:
+    return canonical_sha256(
+        {
+            "action": action.document(),
+            "outputSha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            "facts": facts,
+        }
+    )
+
+
+def _advance_rollout(
+    transaction: TransactionStore,
+    state: dict[str, Any],
+    action: Any,
+    *,
+    output: str = "",
+    facts: Any = None,
+) -> dict[str, Any]:
+    return transaction.advance_rollout_action(
+        expected_id=state["id"],
+        expected_state=state["state"],
+        expected_action_ordinal=action.ordinal,
+        expected_action_kind=action.kind.value,
+        result_sha256=_action_result(action, output=output, facts=facts),
+    )
+
+
+def _execute_upgrade_rollout(
+    paths: ProjectPaths,
+    transaction: TransactionStore,
+    state: dict[str, Any],
+    source: CatalogDeploymentSpec,
+    target: CatalogDeploymentSpec,
+    rollback_spec: RollbackSpec,
+    previous_pointer: RollbackPointer | None,
+) -> dict[str, Any]:
+    plan = build_upgrade_rollout_plan(
+        source, target, rollback_spec.sha256, admission_granted=True
+    )
+    store = RollbackStore(paths)
+    for action in plan.actions:
+        subject_spec = source if action.subject == "source" else target
+        environment = _rollout_environment(
+            state["id"],
+            subject_spec,
+            subject=action.subject,
+            ordinal=action.ordinal,
+            kind=action.kind.value,
+        )
+        output = ""
+        facts: Any = None
+        if action.kind is RolloutActionKind.SOURCE_QUICK:
+            result = run(
+                ["scripts/acceptance-suite.sh", "quick", "--no-record"],
+                cwd=paths.root,
+                timeout=7200,
+                env=environment,
+            )
+            output = result.stdout[-8000:]
+        elif action.kind is RolloutActionKind.FETCH_TARGET_ARTIFACT:
+            result = run(
+                [
+                    "scripts/model-manager.py",
+                    "download",
+                    "--model",
+                    target.catalog_id,
+                    "--catalog-spec-sha256",
+                    target.sha256,
+                    "--artifact-sha256",
+                    str(action.artifact_sha256),
+                    "--replacement",
+                    "--yes",
+                ],
+                cwd=paths.root,
+                timeout=7200,
+                env=environment,
+            )
+            output = result.stdout[-4000:]
+        elif action.kind is RolloutActionKind.STOP_SOURCE:
+            state = transaction.transition(
+                "production_stopping",
+                expected_id=state["id"],
+                expected_state=state["state"],
+                expected_action_ordinal=action.ordinal,
+            )
+            result = run(
+                ["scripts/runtime.sh", "stop"],
+                cwd=paths.root,
+                timeout=900,
+                env=environment,
+            )
+            output = result.stdout[-4000:]
+        elif action.kind is RolloutActionKind.ACTIVATE_TARGET:
+            state = transaction.transition(
+                "candidate_starting",
+                expected_id=state["id"],
+                expected_state=state["state"],
+                expected_action_ordinal=action.ordinal,
+            )
+            result = run(
+                [
+                    "scripts/model-manager.py",
+                    "select",
+                    "--model",
+                    target.catalog_id,
+                    "--catalog-spec-sha256",
+                    target.sha256,
+                    "--replacement",
+                    "--yes",
+                ],
+                cwd=paths.root,
+                timeout=900,
+                env=environment,
+            )
+            output = result.stdout[-4000:]
+        elif action.kind is RolloutActionKind.START_TARGET:
+            result = run(
+                ["scripts/runtime.sh", "start", "latency"],
+                cwd=paths.root,
+                timeout=900,
+                env=environment,
+            )
+            output = result.stdout[-4000:]
+        elif action.kind is RolloutActionKind.TARGET_QUICK:
+            state = transaction.transition(
+                "accepting",
+                expected_id=state["id"],
+                expected_state=state["state"],
+                expected_action_ordinal=action.ordinal,
+            )
+            result = run(
+                ["scripts/acceptance-suite.sh", "quick", "--no-record"],
+                cwd=paths.root,
+                timeout=7200,
+                env=environment,
+            )
+            output = result.stdout[-8000:]
+        elif action.kind is RolloutActionKind.PUBLISH_ROLLBACK:
+            transaction.assert_approved_deployment(
+                transaction_id=state["id"],
+                catalog_spec_sha256=source.sha256,
+                catalog_id=source.catalog_id,
+                rollout_subject="source",
+                action_ordinal=action.ordinal,
+                action_kind=action.kind.value,
+            )
+            # The source was captured before the maintenance window.  Recheck
+            # its current Catalog trust, local artifact/image, host, evidence,
+            # Compose rendering, and controller materials immediately before
+            # granting it future rollback authority.
+            verify_rollback_spec(paths, rollback_spec)
+            expected_generation = previous_pointer.generation if previous_pointer else 0
+            expected_previous = (
+                previous_pointer.active_spec_sha256 if previous_pointer else None
+            )
+            pointer = store.publish(
+                rollback_spec,
+                expected_generation=expected_generation,
+                expected_previous_sha256=expected_previous,
+                transaction_id=state["id"],
+                updated_at=_utc_now(),
+            )
+            facts = pointer.document()
+        else:  # pragma: no cover - exact plan construction is exhaustive.
+            raise ConfigError(f"unsupported upgrade rollout action: {action.kind}")
+        state = _advance_rollout(
+            transaction, state, action, output=output, facts=facts
+        )
+    return transaction.transition(
+        "completed",
+        expected_id=state["id"],
+        expected_state=state["state"],
+        expected_action_ordinal=len(plan.actions),
+    )
+
+
+def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
+    source, _selection = _selected_catalog_spec(paths)
+    if source.catalog_id == args.model:
+        raise UsageError("upgrade target must differ from the selected source")
+    source_admission, admitted_source = _rollout_admission(
+        paths, source.catalog_id, mode="existing-selection"
+    )
+    _require_recovery_anchor_admission(source_admission)
+    target_admission, target = _rollout_admission(
+        paths, args.model, mode="replacement"
+    )
+    if admitted_source.sha256 != source.sha256:
+        raise IntegrityError("source admission changed the selected Catalog subject")
+    facts = {
+        "scopePolicy": "same-controller-same-catalog-anchor-v1",
+        "sourceCatalogId": source.catalog_id,
+        "sourceCatalogSpecSha256": source.sha256,
+        "targetCatalogId": target.catalog_id,
+        "targetCatalogSpecSha256": target.sha256,
+        "networkAcquisitionOnRollbackAllowed": False,
+        "qualificationProduced": False,
+        "sourceAdmission": source_admission,
+        "targetAdmission": target_admission,
+    }
+    if not args.yes:
+        # A dry run is an execution preflight, not merely a Catalog lookup.
+        # Reuse the complete read-only anchor capture with a fixed synthetic
+        # identity so health, latency, evidence, artifacts, Compose, image,
+        # host, and controller drift are rejected before approval.  The
+        # synthetic spec is discarded; execution recaptures the source under
+        # runtime -> transaction locks with its real transaction identity.
+        preflight_original = _original_runtime(paths)
+        capture_rollback_spec(
+            paths,
+            transaction_id=ROLLOUT_PREFLIGHT_TRANSACTION_ID,
+            captured_at=ROLLOUT_PREFLIGHT_CAPTURED_AT,
+            original=preflight_original,
+            source_admission=source_admission,
+        )
+        return CommandResult(
+            "upgrade",
+            "ok",
+            "upgrade preflight passed; no state changed",
+            facts={**facts, "dryRun": True},
+            nextActions=[
+                NextAction(
+                    f"./stack upgrade --model {target.catalog_id} --yes",
+                    "capture an immutable source anchor and execute the typed maintenance window",
+                    True,
+                )
+            ],
+        )
+
+    transaction = TransactionStore(paths)
+    store = RollbackStore(paths)
+    captured: dict[str, Any] = {}
+
+    def capture(transaction_id: str, created_at: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        locked_source, _ = _selected_catalog_spec(paths)
+        locked_admission, locked_admitted_source = _rollout_admission(
+            paths, locked_source.catalog_id, mode="existing-selection"
+        )
+        _require_recovery_anchor_admission(locked_admission)
+        _locked_target_admission, locked_target = _rollout_admission(
+            paths, args.model, mode="replacement"
+        )
+        if (
+            locked_source.sha256 != source.sha256
+            or locked_admitted_source.sha256 != source.sha256
+            or locked_target.sha256 != target.sha256
+        ):
+            raise IntegrityError("Catalog or selected rollout subject changed during locked capture")
+        original = _original_runtime(paths)
+        rollback_spec = capture_rollback_spec(
+            paths,
+            transaction_id=transaction_id,
+            captured_at=created_at,
+            original=original,
+            source_admission=locked_admission,
+        )
+        store.put(rollback_spec)
+        previous_pointer = store.read_pointer()
+        plan = build_upgrade_rollout_plan(
+            source, target, rollback_spec.sha256, admission_granted=True
+        )
+        captured.update(
+            {"rollbackSpec": rollback_spec, "previousPointer": previous_pointer}
+        )
+        return original, _rollout_intent(
+            rollback_spec=rollback_spec,
+            source=source,
+            target=target,
+            plan=plan,
+            previous_pointer=previous_pointer,
+        )
+
+    state = transaction.begin_rollout(
+        "upgrade",
+        target.catalog_id,
+        capture,
+        approved_catalog_spec=target.approval_document(),
+    )
+    try:
+        state = _execute_upgrade_rollout(
+            paths,
+            transaction,
+            state,
+            source,
+            target,
+            captured["rollbackSpec"],
+            captured["previousPointer"],
+        )
+    except (Exception, KeyboardInterrupt) as error:
+        _mark_recovery_required(transaction, state["id"], error)
+        raise
+    return CommandResult(
+        "upgrade",
+        "ok",
+        "typed maintenance-window upgrade completed; quick smoke passed",
+        facts={**facts, "dryRun": False, "transaction": state},
+    )
+
+
+def _execute_rollback_rollout(
+    paths: ProjectPaths,
+    transaction: TransactionStore,
+    state: dict[str, Any],
+    source: CatalogDeploymentSpec,
+    anchor: CatalogDeploymentSpec,
+    rollback_spec: RollbackSpec,
+    pointer: RollbackPointer,
+) -> dict[str, Any]:
+    plan = build_rollback_rollout_plan(
+        source, anchor, rollback_spec.sha256, admission_granted=True
+    )
+    store = RollbackStore(paths)
+    for action in plan.actions:
+        subject_spec = source if action.subject == "source" else anchor
+        environment = _rollout_environment(
+            state["id"],
+            subject_spec,
+            subject=action.subject,
+            ordinal=action.ordinal,
+            kind=action.kind.value,
+        )
+        output = ""
+        facts: Any = None
+        if action.kind is RolloutActionKind.STOP_SOURCE:
+            state = transaction.transition(
+                "production_stopping",
+                expected_id=state["id"],
+                expected_state=state["state"],
+                expected_action_ordinal=action.ordinal,
+            )
+            result = run(
+                ["scripts/runtime.sh", "stop"],
+                cwd=paths.root,
+                timeout=900,
+                env=environment,
+            )
+            output = result.stdout[-4000:]
+        elif action.kind is RolloutActionKind.ACTIVATE_TARGET:
+            state = transaction.transition(
+                "candidate_starting",
+                expected_id=state["id"],
+                expected_state=state["state"],
+                expected_action_ordinal=action.ordinal,
+            )
+            with transaction.authorized_runtime_mutation(
+                state["id"],
+                catalog_spec_sha256=anchor.sha256,
+                catalog_id=anchor.catalog_id,
+                rollout_subject="target",
+                action_ordinal=action.ordinal,
+                action_kind=action.kind.value,
+            ):
+                verify_rollback_spec(paths, rollback_spec)
+                write_anchor_selection(paths, rollback_spec)
+            facts = {"selectionSha256": rollback_spec.document()["selection"]["sha256"]}
+        elif action.kind is RolloutActionKind.START_TARGET:
+            result = run(
+                ["scripts/runtime.sh", "start", "latency"],
+                cwd=paths.root,
+                timeout=900,
+                env={
+                    **environment,
+                    RUNTIME_PULL_POLICY_ENV: RUNTIME_PULL_POLICY_NEVER,
+                },
+            )
+            output = result.stdout[-4000:]
+        elif action.kind is RolloutActionKind.TARGET_QUICK:
+            state = transaction.transition(
+                "accepting",
+                expected_id=state["id"],
+                expected_state=state["state"],
+                expected_action_ordinal=action.ordinal,
+            )
+            result = run(
+                ["scripts/acceptance-suite.sh", "quick", "--no-record"],
+                cwd=paths.root,
+                timeout=7200,
+                env=environment,
+            )
+            output = result.stdout[-8000:]
+        elif action.kind is RolloutActionKind.CLEAR_ROLLBACK:
+            transaction.assert_approved_deployment(
+                transaction_id=state["id"],
+                catalog_spec_sha256=anchor.sha256,
+                catalog_id=anchor.catalog_id,
+                rollout_subject="target",
+                action_ordinal=action.ordinal,
+                action_kind=action.kind.value,
+            )
+            cleared = store.clear(
+                expected_generation=pointer.generation,
+                expected_previous_sha256=rollback_spec.sha256,
+                transaction_id=state["id"],
+                updated_at=_utc_now(),
+            )
+            facts = cleared.document()
+        else:  # pragma: no cover - exact plan construction is exhaustive.
+            raise ConfigError(f"unsupported rollback action: {action.kind}")
+        state = _advance_rollout(
+            transaction, state, action, output=output, facts=facts
+        )
+    return transaction.transition(
+        "completed",
+        expected_id=state["id"],
+        expected_state=state["state"],
+        expected_action_ordinal=len(plan.actions),
+    )
+
+
+def _rollback(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
+    store = RollbackStore(paths)
+    pointer = store.read_pointer()
+    if pointer is None or pointer.active_spec_sha256 is None:
+        raise RecoveryError("no active immutable rollback anchor is available")
+    rollback_spec = store.read_spec(pointer.active_spec_sha256)
+    verification = verify_rollback_spec(paths, rollback_spec)
+    source, _selection = _selected_catalog_spec(paths)
+    try:
+        anchor = CatalogDeploymentSpec.from_document(
+            rollback_spec.document()["catalogSpec"]
+        )
+        plan = build_rollback_rollout_plan(
+            source, anchor, rollback_spec.sha256, admission_granted=True
+        )
+    except (KeyError, DeploymentSpecError) as error:
+        raise ConfigError("active rollback anchor cannot form a typed plan") from error
+    facts = {
+        **verification,
+        "sourceCatalogId": source.catalog_id,
+        "sourceCatalogSpecSha256": source.sha256,
+        "targetCatalogId": anchor.catalog_id,
+        "targetCatalogSpecSha256": anchor.sha256,
+        "pointer": pointer.document(),
+        "rolloutPlan": plan.document(),
+        "networkAcquisitionAllowed": False,
+        "qualificationProduced": False,
+    }
+    if not args.yes:
+        return CommandResult(
+            "rollback",
+            "ok",
+            "rollback anchor and typed plan verified; no state changed",
+            facts={**facts, "dryRun": True},
+            nextActions=[
+                NextAction(
+                    "./stack rollback --yes",
+                    "consume the active one-shot anchor in a maintenance window",
+                    True,
+                )
+            ],
+        )
+
+    transaction = TransactionStore(paths)
+
+    def capture(_transaction_id: str, _created_at: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        locked_pointer = store.read_pointer()
+        if locked_pointer is None or locked_pointer.document() != pointer.document():
+            raise RecoveryError("rollback pointer changed during locked capture")
+        locked_spec = store.read_spec(rollback_spec.sha256)
+        verify_rollback_spec(paths, locked_spec)
+        locked_source, _ = _selected_catalog_spec(paths)
+        if locked_source.sha256 != source.sha256:
+            raise IntegrityError("selected rollback source changed during locked capture")
+        locked_plan = build_rollback_rollout_plan(
+            source, anchor, rollback_spec.sha256, admission_granted=True
+        )
+        return rollback_recovery_original(rollback_spec), _rollout_intent(
+            rollback_spec=rollback_spec,
+            source=source,
+            target=anchor,
+            plan=locked_plan,
+            previous_pointer=pointer,
+        )
+
+    state = transaction.begin_rollout(
+        "rollback",
+        anchor.catalog_id,
+        capture,
+        approved_catalog_spec=anchor.approval_document(),
+    )
+    try:
+        state = _execute_rollback_rollout(
+            paths,
+            transaction,
+            state,
+            source,
+            anchor,
+            rollback_spec,
+            pointer,
+        )
+    except (Exception, KeyboardInterrupt) as error:
+        _mark_recovery_required(transaction, state["id"], error)
+        raise
+    return CommandResult(
+        "rollback",
+        "ok",
+        "one-shot rollback completed; exact anchor quick smoke passed",
+        facts={**facts, "dryRun": False, "transaction": state},
+    )
+
+
 def _accept(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
     _require_yes(args.yes, "acceptance")
     environment = {}
@@ -974,6 +1635,108 @@ def _verify_current_runtime_canonical(
     )
 
 
+def _restore_rollout_pointer(
+    paths: ProjectPaths, document: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Undo only the pointer write described by one persisted rollout intent."""
+
+    intent = document.get("rolloutIntent")
+    if not isinstance(intent, dict):
+        return None
+    try:
+        previous_document = intent["previousRollbackPointer"]
+        previous = (
+            RollbackPointer.from_document(previous_document)
+            if previous_document is not None
+            else None
+        )
+        rollback_spec_sha256 = intent["rollbackSpecSha256"]
+    except (KeyError, RollbackSpecError) as error:
+        raise RecoveryError("rollout recovery pointer intent is invalid") from error
+    store = RollbackStore(paths)
+    current = store.read_pointer()
+    if (current.document() if current else None) == (
+        previous.document() if previous else None
+    ):
+        return current.document() if current else None
+    if current is None:
+        raise RecoveryError("rollback pointer disappeared during rollout recovery")
+    previous_generation = previous.generation if previous else 0
+    expected_generation = previous_generation + 1
+    operation = document.get("operation")
+    if operation == "upgrade":
+        expected_current: str | None = rollback_spec_sha256
+    elif operation == "rollback":
+        expected_current = None
+    else:
+        raise RecoveryError("non-rollout transaction cannot restore a rollback pointer")
+    # A pointer restore is durable before the transaction terminal write.  If
+    # the process dies in that window, recognize the exact monotonic successor
+    # written by this transaction instead of replaying the old CAS forever.
+    current_document = current.document()
+    previous_active = previous.active_spec_sha256 if previous else None
+    if (
+        current.generation == expected_generation + 1
+        and current.active_spec_sha256 == previous_active
+        and current.previous_spec_sha256 == expected_current
+        and current_document.get("updatedByTransactionId") == document["id"]
+    ):
+        return current_document
+    restored = store.restore(
+        previous,
+        expected_current_generation=expected_generation,
+        expected_current_sha256=expected_current,
+        transaction_id=document["id"],
+        updated_at=_utc_now(),
+    )
+    return restored.document()
+
+
+def _verified_rollout_recovery_anchor(
+    paths: ProjectPaths,
+    document: dict[str, Any],
+    original: dict[str, Any],
+) -> tuple[RollbackSpec, dict[str, Any]]:
+    """Load and verify the exact persisted anchor before a recovery mutation."""
+
+    intent = document.get("rolloutIntent")
+    if not isinstance(intent, dict):
+        raise RecoveryError("rollout recovery has no immutable intent")
+    try:
+        spec = RollbackStore(paths).read_spec(intent["rollbackSpecSha256"])
+    except (KeyError, RollbackStoreError) as error:
+        raise RecoveryError("rollout recovery anchor is unavailable") from error
+    if rollback_recovery_original(spec) != original:
+        raise RecoveryError("rollout recovery anchor does not match the persisted original")
+    verification = verify_rollback_spec(paths, spec)
+    return spec, verification
+
+
+def _verify_rollout_recovery(
+    paths: ProjectPaths,
+    document: dict[str, Any],
+    original: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify exact anchor identity, bound quick smoke, and pointer rollback."""
+
+    _spec, verification = _verified_rollout_recovery_anchor(
+        paths, document, original
+    )
+    _verify_restored_runtime(paths, original)
+    result = run(
+        ["scripts/acceptance-suite.sh", "quick", "--no-record"],
+        cwd=paths.root,
+        timeout=7200,
+        env=_transaction_environment(document["id"]),
+    )
+    pointer = _restore_rollout_pointer(paths, document)
+    return {
+        "anchor": verification,
+        "quickOutputSha256": hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(),
+        "rollbackPointer": pointer,
+    }
+
+
 def _resolve_verified_transaction(
     transaction: TransactionStore,
     document: dict[str, Any],
@@ -1069,6 +1832,15 @@ def _reconcile(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
     original = document.get("original", {})
     disposition = plan.get("runtimeDisposition")
     if disposition == "original-runtime-already-restored":
+        rollout_recovery: dict[str, Any] | None = None
+        if document.get("operation") in {"upgrade", "rollback"}:
+            try:
+                rollout_recovery = _verify_rollout_recovery(
+                    paths, document, original
+                )
+            except (Exception, KeyboardInterrupt) as exc:
+                _mark_recovery_required(transaction, document["id"], exc)
+                raise
         state = _resolve_verified_transaction(
             transaction,
             document,
@@ -1079,7 +1851,11 @@ def _reconcile(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
             "reconcile",
             "ok",
             "previous failure was already restored and is now verified",
-            facts={**plan, "transaction": state},
+            facts={
+                **plan,
+                "transaction": state,
+                "rolloutRecovery": rollout_recovery,
+            },
         )
     if disposition == "legacy-failure-healthy-runtime-preserved":
         # Keep the final live observation, exact identity check, and durable
@@ -1107,6 +1883,18 @@ def _reconcile(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
             facts=plan,
         )
 
+    if document.get("operation") in {"upgrade", "rollback"}:
+        try:
+            # Recovery must not rewrite the selected profile or start Compose
+            # until the immutable anchor, current Catalog, controller, local
+            # artifacts, image, host, and retained evidence all reverify.  The
+            # same verification runs again after startup to close the normal
+            # check/use window before the transaction becomes terminal.
+            _verified_rollout_recovery_anchor(paths, document, original)
+        except (Exception, KeyboardInterrupt) as exc:
+            _mark_recovery_required(transaction, document["id"], exc)
+            raise
+
     if document.get("schemaVersion") == TRANSACTION_SCHEMA_VERSION:
         transaction.transition(
             "production_restoring", expected_id=document["id"]
@@ -1125,6 +1913,8 @@ def _reconcile(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
         "QWEN_RESTORE_PRODUCTION": "true" if original.get("healthy") else "false",
         **_transaction_environment(document["id"]),
     }
+    if document.get("operation") in {"upgrade", "rollback"}:
+        environment[RUNTIME_PULL_POLICY_ENV] = RUNTIME_PULL_POLICY_NEVER
     failed_container_name = failed_runtime.get("containerName")
     if isinstance(failed_container_name, str) and failed_container_name:
         environment["QWEN_FAILED_CONTAINER_NAME"] = failed_container_name
@@ -1138,6 +1928,11 @@ def _reconcile(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
             env=environment,
         )
         _verify_restored_runtime(paths, original)
+        rollout_recovery = (
+            _verify_rollout_recovery(paths, document, original)
+            if document.get("operation") in {"upgrade", "rollback"}
+            else None
+        )
     except (Exception, KeyboardInterrupt) as exc:
         _mark_recovery_required(transaction, document["id"], exc)
         raise
@@ -1151,7 +1946,12 @@ def _reconcile(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
         "reconcile",
         "ok",
         "production reconciliation completed and the failure is restored",
-        facts={**plan, "transaction": state, "output": result.stdout[-4000:]},
+        facts={
+            **plan,
+            "transaction": state,
+            "output": result.stdout[-4000:],
+            "rolloutRecovery": rollout_recovery,
+        },
     )
 
 
@@ -1166,6 +1966,10 @@ def dispatch(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
         return _verify(paths, args)
     if args.command == "deploy":
         return _deploy(paths, args)
+    if args.command == "upgrade":
+        return _upgrade(paths, args)
+    if args.command == "rollback":
+        return _rollback(paths, args)
     if args.command == "accept":
         return _accept(paths, args)
     if args.command == "release":
@@ -1421,6 +2225,20 @@ def main(argv: list[str] | None = None) -> int:
             args = parser().parse_args(raw)
             paths = ProjectPaths.discover()
             result = dispatch(paths, args)
+        except RollbackSpecError as exc:
+            result = CommandResult(
+                command_name,
+                "error",
+                str(exc),
+                code=int(ExitCode.INTEGRITY),
+            )
+        except RollbackStoreError as exc:
+            result = CommandResult(
+                command_name,
+                "error",
+                str(exc),
+                code=int(ExitCode.RECOVERY),
+            )
         except StackError as exc:
             result = CommandResult(command_name, "error", exc.summary, code=exc.code, facts=exc.facts)
         except KeyboardInterrupt:

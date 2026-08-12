@@ -58,6 +58,73 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def cleanup_interrupted_noreplace_link_at(
+    directory_descriptor: int,
+    name: str,
+) -> bool:
+    """Repair only the exact hard-link residue of a no-replace publication.
+
+    The portable ``link(temp, final); unlink(temp)`` sequence has a crash
+    window where the immutable final object has two links.  Callers must hold
+    the store's writer lock and pass an already verified private directory fd.
+    An arbitrary hard link remains rejected: cleanup requires exactly one
+    internal temp name with the expected nonce shape and the same inode.
+    """
+
+    prefix = f".{name}."
+    suffix = ".tmp"
+    try:
+        final = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if (
+        not stat.S_ISREG(final.st_mode)
+        or final.st_uid != os.getuid()
+        or stat.S_IMODE(final.st_mode) != 0o600
+        or final.st_nlink != 2
+    ):
+        return False
+    candidates: list[str] = []
+    for entry in os.listdir(directory_descriptor):
+        if not (
+            entry.startswith(prefix)
+            and entry.endswith(suffix)
+            and len(entry) == len(prefix) + 32 + len(suffix)
+        ):
+            continue
+        nonce = entry[len(prefix) : -len(suffix)]
+        if re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
+            continue
+        try:
+            temporary = os.stat(
+                entry,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        if (
+            stat.S_ISREG(temporary.st_mode)
+            and temporary.st_uid == os.getuid()
+            and stat.S_IMODE(temporary.st_mode) == 0o600
+            and temporary.st_nlink == 2
+            and (temporary.st_dev, temporary.st_ino)
+            == (final.st_dev, final.st_ino)
+        ):
+            candidates.append(entry)
+    if len(candidates) != 1:
+        return False
+    os.unlink(candidates[0], dir_fd=directory_descriptor)
+    os.fsync(directory_descriptor)
+    repaired = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    if (
+        repaired.st_nlink != 1
+        or (repaired.st_dev, repaired.st_ino) != (final.st_dev, final.st_ino)
+    ):
+        raise OSError("interrupted no-replace publication did not stabilize")
+    return True
+
+
 def _file_set_sha256(entries: list[dict[str, str]]) -> str:
     """Preserve the original file-set v1 JSON wire encoding.
 
