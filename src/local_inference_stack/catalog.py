@@ -131,6 +131,7 @@ def _validate_model(
         "license",
         "modelDirectory",
         "servedModelId",
+        "performancePolicy",
         "requirements",
         "runtime",
         "artifacts",
@@ -155,6 +156,28 @@ def _validate_model(
         r"[A-Za-z0-9][A-Za-z0-9._-]+", model.get("servedModelId", "")
     ):
         raise CatalogError(f"unsafe servedModelId for {model_id}")
+
+    performance_policy = _mapping(
+        model.get("performancePolicy"), f"performance policy for {model_id}"
+    )
+    _exact_keys(
+        performance_policy,
+        {"schemaVersion", "manifestPath"},
+        "Catalog performance policy",
+    )
+    manifest_path = performance_policy.get("manifestPath")
+    resolved_manifest = resolve_catalog_path(
+        Path("."), manifest_path, suffixes=(".json",)
+    )
+    if (
+        performance_policy.get("schemaVersion") != 1
+        or resolved_manifest is None
+        or not isinstance(manifest_path, str)
+        or Path(manifest_path).as_posix() != manifest_path
+        or Path(manifest_path).parts[0] != "deployments"
+        or Path(manifest_path).name != "manifest.json"
+    ):
+        raise CatalogError(f"invalid performance policy reference for {model_id}")
 
     directory = Path(model.get("modelDirectory", ""))
     if (

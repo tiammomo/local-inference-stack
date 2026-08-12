@@ -27,6 +27,11 @@ from local_inference_stack.materials import (  # noqa: E402
     canonical_sha256,
     sha256_file,
 )
+from local_inference_stack.performance import (  # noqa: E402
+    PerformancePolicyError,
+    ResolvedPerformancePolicy,
+    resolve_catalog_performance_policy,
+)
 
 try:
     from scripts.env_utils import is_private_regular_file, parse_env_file
@@ -37,9 +42,6 @@ except ModuleNotFoundError:  # Direct execution from scripts/.
 COMPOSE_PATH = ROOT_DIR / "compose.yaml"
 LOCAL_PROFILE = ROOT_DIR / "profiles" / "deployment.local.env"
 CATALOG_PATH = ROOT_DIR / "catalog" / "models.json"
-MANIFEST_PATH = (
-    ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.json"
-)
 COMPOSE_VARIABLE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)")
 ACCEPTANCE_MATERIAL_POLICY_ID = (
     "local-inference-stack/runtime-acceptance-materials-v1"
@@ -51,43 +53,25 @@ CONTROL_PLANE_MATERIALS = MaterialSet(
 )
 
 
-def performance_policy_sha256(model: dict[str, Any]) -> str:
-    """Bind full acceptance to the stable performance gates for this model.
+def resolved_performance_policy(
+    model: dict[str, Any], *, require_enforced: bool = False
+) -> ResolvedPerformancePolicy:
+    """Resolve only the reviewed policy explicitly mapped by this Catalog model."""
 
-    The deployment manifest also contains validation results and repository
-    hashes, which would make the input self-referential.  Only fields consumed
-    by ``performance.load_policy`` are included here.
-    """
-    if model.get("id") != "qwen35-9b-q5km":
-        return canonical_sha256(
-            {
-                "catalogModelId": model.get("id"),
-                "performancePolicy": "unvalidated-catalog-profile",
-            }
-        )
     try:
-        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"cannot read performance policy manifest: {error}") from error
-    if manifest.get("model", {}).get("catalogId") != model.get("id"):
-        raise RuntimeError("performance policy manifest does not match the catalog model")
-    performance = manifest.get("performance")
-    if not isinstance(performance, dict):
-        raise RuntimeError("performance policy manifest has no typed performance object")
-    policy = {
-        key: performance[key]
-        for key in (
-            "schemaVersion",
-            "policy",
-            "calibrationRuns",
-            "hardGates",
-            "warningGates",
+        return resolve_catalog_performance_policy(
+            ROOT_DIR,
+            model,
+            require_enforced=require_enforced,
         )
-        if key in performance
-    }
-    return canonical_sha256(
-        {"catalogModelId": model.get("id"), "performance": policy}
-    )
+    except PerformancePolicyError as error:
+        raise RuntimeError(f"cannot resolve Catalog performance policy: {error}") from error
+
+
+def performance_policy_sha256(model: dict[str, Any]) -> str:
+    """Return the exact Catalog-mapped performance-policy identity."""
+
+    return resolved_performance_policy(model).policy_sha256
 
 
 def artifact_stat_fingerprint(metadata: os.stat_result) -> str:
@@ -587,6 +571,7 @@ def acceptance_configuration(
     mode: str = "quick",
     profile: str = "latency",
 ) -> dict[str, str]:
+    performance = resolved_performance_policy(model)
     spec = acceptance_snapshot_spec(mode, profile)
     configuration = spec.snapshot(
         ROOT_DIR,
@@ -600,7 +585,13 @@ def acceptance_configuration(
         }
     )
     if mode == "full":
-        configuration["performancePolicySha256"] = performance_policy_sha256(model)
+        configuration.update(
+            {
+                "performancePolicySha256": performance.policy_sha256,
+                "performanceManifestPath": performance.manifest_relative_path,
+                "performanceManifestSha256": performance.manifest_sha256,
+            }
+        )
     configuration.update(
         {
             "runtimeProfile": profile,
@@ -608,11 +599,7 @@ def acceptance_configuration(
                 configuration.get("deploymentProfileSha256", "absent")
             ),
             "effectiveComposeSha256": rendered_compose_sha256(profile),
-            "manifestSha256": (
-                sha256_file(MANIFEST_PATH)
-                if model["id"] == "qwen35-9b-q5km"
-                else "unvalidated-catalog-profile"
-            ),
+            "manifestSha256": performance.manifest_sha256,
         }
     )
     return configuration

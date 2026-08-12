@@ -169,6 +169,127 @@ class DeploymentSpecTests(unittest.TestCase):
             plan.sha256,
         )
 
+    def test_full_upgrade_is_an_exact_v2_qualification_plan(self) -> None:
+        source_model = self.model()
+        source = CatalogDeploymentSpec.from_catalog_model(source_model)
+        target_model = self.model()
+        target_model["id"] = "qwen35-9b-full"
+        target_model["servedModelId"] = "qwen3.5-9b-full"
+        target_model["modelDirectory"] = "qwen3.5-9b-full"
+        target = CatalogDeploymentSpec.from_catalog_model(target_model)
+        plan = build_upgrade_rollout_plan(
+            source,
+            target,
+            "c" * 64,
+            admission_granted=True,
+            required_acceptance_tier="full",
+            performance_policy_sha256="d" * 64,
+            modelport_source_identity_sha256="e" * 64,
+            qualification_input_sha256="f" * 64,
+        )
+        document = plan.document()
+
+        self.assertEqual(document["schemaVersion"], 2)
+        self.assertEqual(document["requiredAcceptanceTier"], "full")
+        self.assertEqual(
+            document["qualification"],
+            {
+                "policyId": (
+                    "local-inference-stack/transaction-bound-full-qualification-v1"
+                ),
+                "mode": "full",
+                "profile": "latency",
+                "recordEvidence": True,
+                "runSchemaVersion": 2,
+                "evidenceSchemaVersion": 5,
+                "performancePolicySha256": "d" * 64,
+                "modelPortSourceIdentitySha256": "e" * 64,
+                "qualificationInputSha256": "f" * 64,
+            },
+        )
+        kinds = [action["kind"] for action in document["actions"]]
+        self.assertEqual(kinds[-3:], ["target-quick", "target-full", "publish-rollback"])
+        self.assertEqual(
+            parse_rollout_plan(
+                document,
+                rollback_spec_sha256="c" * 64,
+                source=source,
+                target=target,
+            ).document(),
+            document,
+        )
+
+        for mutation in (
+            lambda value: value.update(schemaVersion=True),
+            lambda value: value["qualification"].update(evidenceSchemaVersion=4),
+            lambda value: value["actions"].__setitem__(
+                -2, value["actions"][-3]
+            ),
+            lambda value: value.update(unreviewed=True),
+        ):
+            tampered = copy.deepcopy(document)
+            mutation(tampered)
+            with self.assertRaises(DeploymentSpecError):
+                parse_rollout_plan(
+                    tampered,
+                    rollback_spec_sha256="c" * 64,
+                    source=source,
+                    target=target,
+                )
+
+        for missing in (
+            {},
+            {"performance_policy_sha256": "d" * 64},
+            {"modelport_source_identity_sha256": "e" * 64},
+            {
+                "performance_policy_sha256": "d" * 64,
+                "modelport_source_identity_sha256": "e" * 64,
+            },
+        ):
+            with self.assertRaisesRegex(DeploymentSpecError, "requires"):
+                build_upgrade_rollout_plan(
+                    source,
+                    target,
+                    "c" * 64,
+                    admission_granted=True,
+                    required_acceptance_tier="full",
+                    **missing,
+                )
+
+        with self.assertRaisesRegex(DeploymentSpecError, "quick upgrade"):
+            build_upgrade_rollout_plan(
+                source,
+                target,
+                "c" * 64,
+                admission_granted=True,
+                performance_policy_sha256="d" * 64,
+                modelport_source_identity_sha256="e" * 64,
+                qualification_input_sha256="f" * 64,
+            )
+
+    def test_quick_upgrade_and_rollback_keep_the_v1_shape(self) -> None:
+        source = CatalogDeploymentSpec.from_catalog_model(self.model())
+        target_model = self.model()
+        target_model["id"] = "qwen35-9b-next"
+        target_model["servedModelId"] = "qwen3.5-9b-next"
+        target_model["modelDirectory"] = "qwen3.5-9b-next"
+        target = CatalogDeploymentSpec.from_catalog_model(target_model)
+        for plan in (
+            build_upgrade_rollout_plan(
+                source, target, "d" * 64, admission_granted=True
+            ),
+            build_rollback_rollout_plan(
+                target, source, "d" * 64, admission_granted=True
+            ),
+        ):
+            document = plan.document()
+            self.assertEqual(document["schemaVersion"], 1)
+            self.assertEqual(document["requiredAcceptanceTier"], "quick")
+            self.assertNotIn("qualification", document)
+            self.assertNotIn(
+                "target-full", [action["kind"] for action in document["actions"]]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

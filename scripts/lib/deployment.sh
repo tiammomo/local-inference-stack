@@ -54,6 +54,42 @@ load_deployment_env() {
   export MODELPORT_NETWORK_NAME="${MODELPORT_NETWORK_NAME:-modelport_default}"
 }
 
+load_private_modelport_token() {
+  local root_dir="$1"
+  local env_file="$2"
+  local token
+  token="$(
+    unset QWEN_CONTROL_TRANSACTION_ID \
+      LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256 \
+      LOCAL_INFERENCE_ROLLOUT_SUBJECT \
+      LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL \
+      LOCAL_INFERENCE_ROLLOUT_ACTION_KIND \
+      LOCAL_INFERENCE_RUNTIME_PULL_POLICY \
+      QWEN_RUNTIME_LOCK_HELD \
+      LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN \
+      MODELPORT_AUTH_TOKEN
+    python3 - "$root_dir" "$env_file" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from scripts.env_utils import read_private_env_values
+
+values = read_private_env_values(
+    Path(sys.argv[2]), allowed_keys=frozenset({"MODELPORT_AUTH_TOKEN"})
+)
+token = values.get("MODELPORT_AUTH_TOKEN")
+if not token:
+    raise SystemExit("private ModelPort credential file has no authentication token")
+if "\n" in token or "\r" in token or "\0" in token:
+    raise SystemExit("private ModelPort authentication token is invalid")
+sys.stdout.write(token)
+PY
+  )" || return
+  export MODELPORT_AUTH_TOKEN="$token"
+}
+
 assert_approved_catalog_spec() {
   local root_dir="$1"
   local require_selected="${2:-false}"
@@ -123,6 +159,7 @@ run_clean_compose() {
 
 acquire_runtime_lock() {
   local root_dir="$1"
+  local mutation_purpose="${2:-unspecified}"
   local package_root
   package_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   local lock_dir="$root_dir/cache/locks"
@@ -184,7 +221,8 @@ acquire_runtime_lock() {
     "${LOCAL_INFERENCE_ROLLOUT_SUBJECT:-}" \
     "${LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL:-}" \
     "${LOCAL_INFERENCE_ROLLOUT_ACTION_KIND:-}" \
-    "${LOCAL_INFERENCE_RUNTIME_PULL_POLICY:-}" <<'PY'
+    "${LOCAL_INFERENCE_RUNTIME_PULL_POLICY:-}" \
+    "$mutation_purpose" <<'PY'
 import sys
 import uuid
 from pathlib import Path
@@ -203,6 +241,7 @@ rollout_subject = sys.argv[6] or None
 encoded_ordinal = sys.argv[7]
 action_kind = sys.argv[8] or None
 pull_policy = sys.argv[9] or None
+mutation_purpose = sys.argv[10]
 action_ordinal = None
 if pull_policy not in {None, "never"}:
     raise SystemExit("unsupported controlled runtime pull policy")
@@ -293,6 +332,20 @@ if (
         raise SystemExit(
             "active Catalog-bound transaction is missing its approved Catalog spec SHA256"
         )
+    if schema == 2 and operation in {"upgrade", "rollback"} and state not in {
+        "recovery_required",
+        "production_restoring",
+    }:
+        expected_action = {
+            "start": "start-target",
+            "stop": "stop-source",
+            "profile": None,
+            "restart": None,
+        }.get(mutation_purpose)
+        if expected_action is None or action_kind != expected_action:
+            raise SystemExit(
+                "runtime mutation purpose is not authorized by the pending rollout action"
+            )
     try:
         store.assert_approved_deployment(
             transaction_id=provided,

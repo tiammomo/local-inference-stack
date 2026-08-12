@@ -10,12 +10,14 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from argparse import Namespace
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from local_inference_stack import cli  # noqa: E402
+from local_inference_stack.acceptance import (  # noqa: E402
+    MODELPORT_SOURCE_IDENTITY_POLICY,
+    MODELPORT_SOURCE_MATERIAL_PATHS,
+    QUALIFICATION_INPUT_POLICY,
+    REVIEWED_LOGICAL_MODELS,
+)
 from local_inference_stack.catalog import load_catalog  # noqa: E402
 from local_inference_stack.deployment import (  # noqa: E402
     CatalogDeploymentSpec,
@@ -33,7 +41,9 @@ from local_inference_stack.deployment import (  # noqa: E402
 )
 from local_inference_stack.paths import ProjectPaths  # noqa: E402
 from local_inference_stack.result import (  # noqa: E402
+    AdmissionError,
     ExternalError,
+    IntegrityError,
     RecoveryError,
     UsageError,
 )
@@ -75,6 +85,37 @@ def _specs() -> tuple[CatalogDeploymentSpec, CatalogDeploymentSpec]:
         CatalogDeploymentSpec.from_catalog_model(source_model),
         CatalogDeploymentSpec.from_catalog_model(target_model),
     )
+
+
+def _qualification_input(
+    target: CatalogDeploymentSpec,
+    *,
+    modelport_source_identity_sha256: str,
+) -> dict[str, Any]:
+    value = {
+        "policyId": QUALIFICATION_INPUT_POLICY,
+        "targetCatalogSpecSha256": target.sha256,
+        "providerContractId": "local-qwen-provider-v1",
+        "providerContractSha256": "3" * 64,
+        "servedModelId": target.served_model_id,
+        "limitsSha256": "4" * 64,
+        "acceptanceSha256": "5" * 64,
+        "logicalModels": copy.deepcopy(REVIEWED_LOGICAL_MODELS),
+        "providerMatrixModel": "qwen3.5-code",
+        "toolUseMaxTokens": 2048,
+        "directContextTokens": 118000,
+        "modelPortContextTokens": 92000,
+        "modelPortContextMaxTokens": 32768,
+        "decodeTokens": 512,
+        "decodeContextTokens": 0,
+        "concurrency": 2,
+        "concurrencyTokens": 512,
+        "modelPortSourceIdentitySha256": modelport_source_identity_sha256,
+        "liveModelRegistrySha256": "6" * 64,
+        "toolUseLocalProviderReady": True,
+    }
+    value["sha256"] = cli.sha256_document(value)
+    return value
 
 
 def _pointer(
@@ -131,6 +172,8 @@ class RecordingTransaction:
         self.approvals: list[dict[str, Any]] = []
         self.authorizations: list[dict[str, Any]] = []
         self.begin_calls: list[dict[str, Any]] = []
+        self.runtime_events: list[str] = []
+        self.qualification_bindings: list[dict[str, Any]] = []
 
     def begin_rollout(
         self,
@@ -175,6 +218,33 @@ class RecordingTransaction:
         self.advances.append(dict(kwargs))
         self.state["rolloutActionOrdinal"] = kwargs["expected_action_ordinal"] + 1
         return copy.deepcopy(self.state)
+
+    @contextmanager
+    def runtime_boundary(self) -> Any:
+        self.runtime_events.append("enter")
+        try:
+            yield
+        finally:
+            self.runtime_events.append("exit")
+
+    def pending_rollout_qualification_binding(self, **kwargs: Any) -> dict[str, Any]:
+        self.qualification_bindings.append(dict(kwargs))
+        return {
+            "policyId": "local-inference-stack/rollout-qualification-binding-v1",
+            "transactionId": kwargs["transaction_id"],
+            "operation": "upgrade",
+            "rolloutPlanSha256": "1" * 64,
+            "actionOrdinal": kwargs["action_ordinal"],
+            "actionKind": "target-full",
+            "rollbackSpecSha256": ROLLBACK_SHA256,
+            "sourceCatalogSpecSha256": self.state.get(
+                "sourceCatalogSpecSha256", "2" * 64
+            ),
+            "targetCatalogSpecSha256": kwargs["catalog_spec_sha256"],
+            "performancePolicySha256": "3" * 64,
+            "modelPortSourceIdentitySha256": "4" * 64,
+            "qualificationInputSha256": "5" * 64,
+        }
 
     def assert_approved_deployment(self, **kwargs: Any) -> CatalogDeploymentSpec:
         self.approvals.append(dict(kwargs))
@@ -225,9 +295,133 @@ class RolloutCliTestCase(unittest.TestCase):
 
 
 class RolloutParserAndDryRunTests(RolloutCliTestCase):
+    def test_qualification_reader_rejects_ancestor_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as outside_directory:
+            outside = Path(outside_directory)
+            (outside / "acceptance").mkdir(mode=0o700)
+            evidence = outside / "acceptance" / "qualification-test.json"
+            evidence.write_text('{"outside":true}\n', encoding="utf-8")
+            evidence.chmod(0o600)
+            (self.paths.root / "logs").symlink_to(
+                outside, target_is_directory=True
+            )
+            with self.assertRaisesRegex(IntegrityError, "unsafe"):
+                cli._strict_private_qualification_json(
+                    self.paths,
+                    Path("logs/acceptance/qualification-test.json"),
+                    label="qualification evidence",
+                )
+
+    def test_modelport_preflight_delegates_to_the_evidence_contract(self) -> None:
+        materials = [
+            {"path": path, "sha256": str(index) * 64}
+            for index, path in enumerate(MODELPORT_SOURCE_MATERIAL_PATHS, start=1)
+        ]
+        identity = {
+            "policyId": MODELPORT_SOURCE_IDENTITY_POLICY,
+            "gitCommit": "a" * 40,
+            "gitTree": "b" * 40,
+            "sourceState": "clean",
+            "materials": materials,
+            "materialsSha256": cli.sha256_document(materials),
+            "liveServiceIdentity": {
+                "endpoint": "http://127.0.0.1:38082/livez",
+                "service": "model-port",
+                "status": "ok",
+                "build": {
+                    "revision": "a" * 40,
+                    "sourceState": "clean",
+                    "version": "1.2.3",
+                    "configSha256": materials[0]["sha256"],
+                },
+            },
+        }
+        qualification_input = {
+            "policyId": QUALIFICATION_INPUT_POLICY,
+            "targetCatalogSpecSha256": self.target.sha256,
+            "providerContractId": "local-qwen-provider-v1",
+            "providerContractSha256": "b" * 64,
+            "servedModelId": self.target.served_model_id,
+            "limitsSha256": "c" * 64,
+            "acceptanceSha256": "d" * 64,
+            "logicalModels": REVIEWED_LOGICAL_MODELS,
+            "providerMatrixModel": "qwen3.5-code",
+            "toolUseMaxTokens": 2048,
+            "directContextTokens": 118000,
+            "modelPortContextTokens": 92000,
+            "modelPortContextMaxTokens": 32768,
+            "decodeTokens": 512,
+            "decodeContextTokens": 0,
+            "concurrency": 2,
+            "concurrencyTokens": 512,
+            "modelPortSourceIdentitySha256": cli.sha256_document(identity),
+            "liveModelRegistrySha256": "e" * 64,
+            "toolUseLocalProviderReady": True,
+        }
+        qualification_input["sha256"] = cli.sha256_document(qualification_input)
+        completed = RunResult(
+            (
+                "scripts/acceptance-evidence.py",
+                "qualification-preflight",
+                "--modelport-project",
+                "/srv/modelport",
+            ),
+            0,
+            json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "status": "ready",
+                    "modelPortSourceIdentity": identity,
+                    "qualificationInput": qualification_input,
+                    "prerequisites": {
+                        "nodeMajor": 24,
+                        "credentials": "available",
+                        "providerCompatibility": "passed",
+                        "dashboard": "ok",
+                    },
+                }
+            ),
+            "",
+        )
+        with (
+            patch.dict(os.environ, {"MODELPORT_PROJECT_DIR": "/srv/modelport"}),
+            patch.object(cli, "run", return_value=completed) as runner,
+        ):
+            path, observed, qualification = cli._modelport_qualification_preflight(
+                self.paths, self.target
+            )
+        self.assertEqual(path, "/srv/modelport")
+        self.assertEqual(observed, identity)
+        self.assertEqual(qualification, qualification_input)
+        runner.assert_called_once_with(
+            [
+                "scripts/acceptance-evidence.py",
+                "qualification-preflight",
+                "--modelport-project",
+                "/srv/modelport",
+                "--catalog-model-id",
+                self.target.catalog_id,
+                "--catalog-spec-sha256",
+                self.target.sha256,
+            ],
+            cwd=self.paths.root,
+            timeout=60,
+        )
+
     def test_upgrade_parser_defaults_to_read_only_and_rollback_rejects_model(self) -> None:
         parsed = cli.parser().parse_args(["upgrade", "--model", self.target.catalog_id])
         self.assertFalse(parsed.yes)
+        self.assertEqual(parsed.qualification, "quick")
+        full = cli.parser().parse_args(
+            [
+                "upgrade",
+                "--model",
+                self.target.catalog_id,
+                "--qualification",
+                "full",
+            ]
+        )
+        self.assertEqual(full.qualification, "full")
         with self.assertRaises(UsageError):
             cli.parser().parse_args(["rollback", "--model", self.source.catalog_id])
 
@@ -266,6 +460,113 @@ class RolloutParserAndDryRunTests(RolloutCliTestCase):
                 "catalogRecoveryEligible": True,
             },
         )
+
+    def test_full_upgrade_preflights_modelport_and_performance_before_transaction(
+        self,
+    ) -> None:
+        events: list[str] = []
+        performance = SimpleNamespace(
+            manifest_relative_path="deployments/reviewed/manifest.json",
+            manifest_sha256="b" * 64,
+            policy_sha256="c" * 64,
+        )
+
+        def runner(argv: list[str], **_kwargs: Any) -> RunResult:
+            self.assertEqual(
+                argv,
+                [
+                    "python3",
+                    "src/local_inference_stack/performance.py",
+                    "--manifest",
+                    performance.manifest_relative_path,
+                    "--expected-policy-sha256",
+                    performance.policy_sha256,
+                    "--catalog-id",
+                    self.target.catalog_id,
+                ],
+            )
+            events.append("performance")
+            raise ExternalError("performance policy is not ready")
+
+        with (
+            patch.object(cli, "_selected_catalog_spec", return_value=(self.source, {})),
+            patch.object(
+                cli,
+                "_rollout_admission",
+                side_effect=self._admission(self.source, self.target),
+            ),
+            patch.object(
+                cli,
+                "_modelport_qualification_preflight",
+                side_effect=lambda _paths, _target: (
+                    events.append("modelport")
+                    or (
+                        "/srv/modelport",
+                        {"gitCommit": "a" * 40},
+                        {
+                            "providerMatrixModel": "qwen3.5-code",
+                            "toolUseMaxTokens": 2048,
+                        },
+                    )
+                ),
+            ),
+            patch.object(
+                cli,
+                "_target_performance_preflight",
+                return_value=performance,
+            ),
+            patch.object(cli, "run", side_effect=runner),
+            patch.object(cli, "TransactionStore") as transaction_type,
+            patch.object(cli, "RollbackStore") as rollback_store_type,
+            patch.object(cli, "capture_rollback_spec") as capture,
+            self.assertRaisesRegex(ExternalError, "performance policy"),
+        ):
+            cli._upgrade(
+                self.paths,
+                Namespace(
+                    model=self.target.catalog_id,
+                    qualification="full",
+                    yes=True,
+                ),
+            )
+        self.assertEqual(events, ["modelport", "performance"])
+        transaction_type.assert_not_called()
+        rollback_store_type.assert_not_called()
+        capture.assert_not_called()
+
+    def test_full_static_preflight_failure_is_zero_write_and_zero_runtime(self) -> None:
+        with (
+            patch.object(cli, "_selected_catalog_spec", return_value=(self.source, {})),
+            patch.object(
+                cli,
+                "_rollout_admission",
+                side_effect=self._admission(self.source, self.target),
+            ),
+            patch.object(
+                cli,
+                "_modelport_qualification_preflight",
+                side_effect=AdmissionError("static qualification prerequisite failed"),
+            ),
+            patch.object(cli, "run") as runner,
+            patch.object(cli, "_original_runtime") as original,
+            patch.object(cli, "TransactionStore") as transaction_type,
+            patch.object(cli, "RollbackStore") as rollback_store_type,
+            patch.object(cli, "capture_rollback_spec") as capture,
+            self.assertRaisesRegex(AdmissionError, "static qualification"),
+        ):
+            cli._upgrade(
+                self.paths,
+                Namespace(
+                    model=self.target.catalog_id,
+                    qualification="full",
+                    yes=True,
+                ),
+            )
+        runner.assert_not_called()
+        original.assert_not_called()
+        transaction_type.assert_not_called()
+        rollback_store_type.assert_not_called()
+        capture.assert_not_called()
 
     def test_upgrade_dry_run_rejects_source_drift_before_any_control_write(self) -> None:
         original = {"healthy": False, "profile": "latency"}
@@ -527,6 +828,173 @@ class RolloutExecutionTests(RolloutCliTestCase):
         self.assertEqual(
             transaction.advances[-1]["result_sha256"],
             cli._action_result(plan.actions[-1], facts=published.document()),
+        )
+        self.assertEqual(state["state"], "completed")
+
+    def test_full_qualification_is_receipted_inside_runtime_boundary_before_publish(
+        self,
+    ) -> None:
+        transaction = RecordingTransaction()
+        store = MagicMock()
+        published = _pointer(1, ROLLBACK_SHA256, None)
+        receipt = {
+            "policyId": "local-inference-stack/rollout-qualification-receipt-v1",
+            "evidencePath": (
+                f"logs/acceptance/qualification-{TRANSACTION_ID}-6.json"
+            ),
+            "evidenceSha256": "1" * 64,
+            "evidenceSelfSha256": "2" * 64,
+            "runManifestPath": (
+                f"logs/acceptance/qualification-{TRANSACTION_ID}-6.run.json"
+            ),
+            "runManifestSha256": "3" * 64,
+            "runManifestSelfSha256": "4" * 64,
+            "stepResultsSha256": "5" * 64,
+            "configurationSha256": "6" * 64,
+            "runtimeIdentitySha256": "7" * 64,
+            "rolloutBindingSha256": "8" * 64,
+        }
+        observed: list[tuple[list[str], dict[str, Any]]] = []
+
+        def runner(argv: list[str], **kwargs: Any) -> RunResult:
+            observed.append((list(argv), dict(kwargs)))
+            if argv == ["scripts/acceptance-suite.sh", "full"]:
+                self.assertEqual(transaction.runtime_events, ["enter"])
+            return _completed(argv)
+
+        def publish(*args: Any, **kwargs: Any) -> RollbackPointer:
+            self.assertEqual(transaction.runtime_events, ["enter", "exit"])
+            return published
+
+        store.publish.side_effect = publish
+        performance = SimpleNamespace(
+            manifest_relative_path="deployments/reviewed/manifest.json",
+            manifest_sha256="c" * 64,
+            policy_sha256="d" * 64,
+        )
+        qualification_input = {
+            "policyId": QUALIFICATION_INPUT_POLICY,
+            "targetCatalogSpecSha256": self.target.sha256,
+            "providerContractId": "local-qwen-provider-v1",
+            "providerContractSha256": "1" * 64,
+            "servedModelId": self.target.served_model_id,
+            "limitsSha256": "2" * 64,
+            "acceptanceSha256": "3" * 64,
+            "logicalModels": REVIEWED_LOGICAL_MODELS,
+            "providerMatrixModel": "qwen3.5-code",
+            "toolUseMaxTokens": 2048,
+            "directContextTokens": 118000,
+            "modelPortContextTokens": 92000,
+            "modelPortContextMaxTokens": 32768,
+            "decodeTokens": 512,
+            "decodeContextTokens": 0,
+            "concurrency": 2,
+            "concurrencyTokens": 512,
+            "modelPortSourceIdentitySha256": "e" * 64,
+            "liveModelRegistrySha256": "4" * 64,
+            "toolUseLocalProviderReady": True,
+        }
+        qualification_input["sha256"] = cli.sha256_document(qualification_input)
+        plan = build_upgrade_rollout_plan(
+            self.source,
+            self.target,
+            ROLLBACK_SHA256,
+            admission_granted=True,
+            required_acceptance_tier="full",
+            performance_policy_sha256="d" * 64,
+            modelport_source_identity_sha256="e" * 64,
+            qualification_input_sha256=qualification_input["sha256"],
+        )
+        full_action = next(
+            action
+            for action in plan.actions
+            if action.kind is RolloutActionKind.TARGET_FULL
+        )
+        with (
+            patch.object(cli, "RollbackStore", return_value=store),
+            patch.object(cli, "verify_rollback_spec"),
+            patch.object(
+                cli,
+                "_modelport_qualification_preflight",
+                return_value=(
+                    "/srv/modelport",
+                    {"identity": "reviewed"},
+                    qualification_input,
+                ),
+            ),
+            patch.object(
+                cli, "_target_performance_preflight", return_value=performance
+            ),
+            patch.object(cli, "run", side_effect=runner),
+            patch.object(
+                cli, "_qualification_evidence_receipt", return_value=receipt
+            ) as read_receipt,
+            patch.object(cli, "_utc_now", return_value=UPDATED_AT),
+        ):
+            state = cli._execute_upgrade_rollout(
+                self.paths,
+                transaction,
+                copy.deepcopy(transaction.state),
+                self.source,
+                self.target,
+                self.rollback_spec,
+                None,
+                qualification="full",
+                modelport_project_dir="/srv/modelport",
+                qualification_input=qualification_input,
+                performance_policy=performance,
+            )
+
+        self.assertEqual(transaction.runtime_events, ["enter", "exit"])
+        self.assertEqual(
+            [argv for argv, _kwargs in observed][-2:],
+            [
+                ["scripts/acceptance-suite.sh", "quick", "--no-record"],
+                ["scripts/acceptance-suite.sh", "full"],
+            ],
+        )
+        full_kwargs = observed[-1][1]
+        self.assertEqual(
+            full_kwargs["env"],
+            {
+                **cli._rollout_environment(
+                    TRANSACTION_ID,
+                    self.target,
+                    subject="target",
+                    ordinal=full_action.ordinal,
+                    kind="target-full",
+                ),
+                "MODELPORT_PROJECT_DIR": "/srv/modelport",
+                "LOCAL_INFERENCE_PROVIDER_MATRIX_MODEL": "qwen3.5-code",
+                "LOCAL_INFERENCE_TOOL_USE_MAX_TOKENS": "2048",
+                "LOCAL_INFERENCE_SERVED_MODEL_ID": self.target.served_model_id,
+                "LOCAL_INFERENCE_LOGICAL_FAST_MODEL": "qwen3.5-fast",
+                "LOCAL_INFERENCE_LOGICAL_CODE_MODEL": "qwen3.5-code",
+                "LOCAL_INFERENCE_LOGICAL_DEEP_MODEL": "qwen3.5-deep",
+                "LOCAL_INFERENCE_DIRECT_CONTEXT_TOKENS": "118000",
+                "LOCAL_INFERENCE_MODELPORT_CONTEXT_TOKENS": "92000",
+                "LOCAL_INFERENCE_MODELPORT_CONTEXT_MAX_TOKENS": "32768",
+                "LOCAL_INFERENCE_DECODE_TOKENS": "512",
+                "LOCAL_INFERENCE_DECODE_CONTEXT_TOKENS": "0",
+                "LOCAL_INFERENCE_CONCURRENCY": "2",
+                "LOCAL_INFERENCE_CONCURRENCY_TOKENS": "512",
+                "LOCAL_INFERENCE_PERFORMANCE_MANIFEST": (
+                    performance.manifest_relative_path
+                ),
+                "LOCAL_INFERENCE_PERFORMANCE_POLICY_SHA256": (
+                    performance.policy_sha256
+                ),
+            },
+        )
+        full_advance = transaction.advances[full_action.ordinal]
+        self.assertEqual(full_advance["qualification_evidence"], receipt)
+        self.assertNotIn("result_sha256", full_advance)
+        read_receipt.assert_called_once_with(
+            self.paths,
+            transaction,
+            unittest.mock.ANY,
+            self.target,
+            full_action,
         )
         self.assertEqual(state["state"], "completed")
 

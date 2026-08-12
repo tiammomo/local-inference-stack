@@ -17,17 +17,26 @@ from types import ModuleType
 from typing import Any
 
 from .acceptance import (
+    ROLLOUT_EVIDENCE_SCHEMA_VERSION,
+    ROLLOUT_RUN_SCHEMA_VERSION,
     VALIDATION_INPUT_POLICY,
     expected_steps,
+    rollout_binding_valid,
     run_manifest_matches_evidence,
+    acceptance_evidence_shape_valid,
     run_record_valid,
     sha256_document,
     validation_input,
 )
 from .paths import ProjectPaths
-from .materials import canonical_bytes
-from .result import ConfigError, IntegrityError
+from .materials import (
+    MaterialError,
+    canonical_bytes,
+    read_private_json_file,
+)
+from .result import ConfigError, IntegrityError, RecoveryError
 from .runner import run
+from .transactions import TransactionStore
 
 
 SCHEMA_VERSION = 2
@@ -38,6 +47,9 @@ SIGNATURE_TRUST_MODEL = "externally-managed-key-with-sha256-fingerprint"
 SUBJECT_SCHEMA_VERSION = 1
 SUBJECT_POLICY = "local-inference-stack/evidence-derived-subject-v1"
 EVIDENCE_SCHEMA_VERSION = 4
+EVIDENCE_SCHEMA_VERSIONS = frozenset(
+    {EVIDENCE_SCHEMA_VERSION, ROLLOUT_EVIDENCE_SCHEMA_VERSION}
+)
 EVIDENCE_MAX_AGE_DAYS = 30
 FULL_TERMINAL_STEP = expected_steps("full")[-1]
 ALLOWED_SIGNATURE_TOOLS = ("cosign", "minisign")
@@ -199,31 +211,22 @@ def _git_facts(
     return {"revision": revision, "dirty": dirty}
 
 
-def _private_json(path: Path) -> dict[str, Any] | None:
-    descriptor: int | None = None
+def _private_json_with_sha256(
+    path: Path, *, root: Path | None = None
+) -> tuple[dict[str, Any], str] | None:
     try:
-        descriptor = os.open(
+        return read_private_json_file(
             path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            root=root or ProjectPaths.discover().root,
+            maximum_bytes=1024 * 1024,
         )
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_uid != os.getuid()
-            or metadata.st_nlink != 1
-            or metadata.st_size > 1024 * 1024
-        ):
-            return None
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            descriptor = None
-            document = json.load(handle)
-        return document if isinstance(document, dict) else None
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (MaterialError, OSError, RuntimeError, ValueError):
         return None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+
+
+def _private_json(path: Path, *, root: Path | None = None) -> dict[str, Any] | None:
+    observed = _private_json_with_sha256(path, root=root)
+    return observed[0] if observed is not None else None
 
 
 def _relative_acceptance_path(paths: ProjectPaths, evidence_path: Path) -> str | None:
@@ -255,13 +258,10 @@ def _runner_manifest_source_valid(
     ):
         return False
     path = paths.root / relative
-    manifest = _private_json(path)
-    if manifest is None:
+    observed = _private_json_with_sha256(path, root=paths.root)
+    if observed is None:
         return False
-    try:
-        source_sha = _sha256_file(path, maximum_bytes=1024 * 1024)
-    except IntegrityError:
-        return False
+    manifest, source_sha = observed
     return bool(
         source_sha == identity.get("sourceSha256")
         and run_manifest_matches_evidence(manifest, run_record, evidence)
@@ -295,6 +295,8 @@ def _evidence_subject(
     paths: ProjectPaths,
     evidence_path: Path,
     evidence: dict[str, Any],
+    *,
+    evidence_sha256: str | None = None,
 ) -> dict[str, Any]:
     relative_source = _relative_acceptance_path(paths, evidence_path)
     if relative_source is None:
@@ -321,7 +323,7 @@ def _evidence_subject(
         },
         "acceptance": {
             "sourcePath": relative_source,
-            "sourceSha256": _sha256_file(
+            "sourceSha256": evidence_sha256 or _sha256_file(
                 evidence_path, maximum_bytes=1024 * 1024
             ),
             "schemaVersion": evidence.get("schemaVersion"),
@@ -397,17 +399,88 @@ def _eligibility_claims_match(
     return all(recorded.get(key) == current.get(key) for key in keys)
 
 
+def _completed_upgrade_qualification(
+    paths: ProjectPaths,
+    evidence_path: Path,
+    evidence: dict[str, Any],
+    *,
+    evidence_sha256: str | None = None,
+) -> bool:
+    """Resolve v5 evidence through the exact completed rollout receipt."""
+
+    if evidence.get("schemaVersion") != ROLLOUT_EVIDENCE_SCHEMA_VERSION:
+        return evidence.get("schemaVersion") == EVIDENCE_SCHEMA_VERSION
+    binding = evidence.get("rolloutBinding")
+    run_record = evidence.get("run")
+    manifest_identity = (
+        run_record.get("manifest") if isinstance(run_record, dict) else None
+    )
+    frozen_inputs = evidence.get("frozenInputs")
+    configuration = evidence.get("configuration")
+    relative_source = _relative_acceptance_path(paths, evidence_path)
+    if (
+        not rollout_binding_valid(binding)
+        or not isinstance(manifest_identity, dict)
+        or not isinstance(frozen_inputs, dict)
+        or not isinstance(configuration, dict)
+        or relative_source is None
+    ):
+        return False
+    basename = (
+        f"qualification-{binding['transactionId']}-{binding['actionOrdinal']}"
+    )
+    expected_evidence = f"logs/acceptance/{basename}.json"
+    expected_manifest = f"logs/acceptance/{basename}.run.json"
+    binding_sha256 = sha256_document(binding)
+    if (
+        evidence.get("evidenceId") != basename
+        or relative_source != expected_evidence
+        or manifest_identity.get("sourcePath") != expected_manifest
+    ):
+        return False
+    try:
+        receipt = TransactionStore(paths).completed_upgrade_qualification(
+            binding["transactionId"],
+            evidence_path=expected_evidence,
+            evidence_self_sha256=evidence["selfSha256"],
+            rollout_binding_sha256=binding_sha256,
+        )
+        observed_sha256 = evidence_sha256 or _sha256_file(
+            evidence_path, maximum_bytes=1024 * 1024
+        )
+    except (KeyError, IntegrityError, RecoveryError, OSError, ValueError):
+        return False
+    return bool(
+        receipt.get("evidenceSha256") == observed_sha256
+        and receipt.get("runManifestPath") == expected_manifest
+        and receipt.get("runManifestSha256")
+        == manifest_identity.get("sourceSha256")
+        and receipt.get("runManifestSelfSha256")
+        == manifest_identity.get("selfSha256")
+        and receipt.get("stepResultsSha256")
+        == sha256_document(run_record.get("stepResults"))
+        and receipt.get("configurationSha256")
+        == sha256_document(configuration)
+        and receipt.get("runtimeIdentitySha256")
+        == frozen_inputs.get("liveRuntimeIdentitySha256")
+        and receipt.get("rolloutBindingSha256") == binding_sha256
+    )
+
+
 def _eligibility(
     paths: ProjectPaths,
     evidence_path: Path,
     evidence: dict[str, Any],
     git: dict[str, Any],
+    *,
+    evidence_sha256: str | None = None,
 ) -> dict[str, Any]:
     relative_source = _relative_acceptance_path(paths, evidence_path)
     self_hash = _evidence_self_hash(evidence)
     configuration = evidence.get("configuration")
     complete = (
-        evidence.get("terminalStep") == FULL_TERMINAL_STEP
+        acceptance_evidence_shape_valid(evidence)
+        and evidence.get("terminalStep") == FULL_TERMINAL_STEP
         and isinstance(evidence.get("durationSeconds"), int)
         and not isinstance(evidence.get("durationSeconds"), bool)
         and evidence.get("durationSeconds", -1) >= 0
@@ -425,11 +498,21 @@ def _eligibility(
             configuration=configuration,
         )
         and _runner_manifest_source_valid(paths, evidence)
+        and _completed_upgrade_qualification(
+            paths,
+            evidence_path,
+            evidence,
+            evidence_sha256=evidence_sha256,
+        )
     )
     validation_input = evidence.get("validationInput")
+    evidence_schema = evidence.get("schemaVersion")
     checks = {
         "sourcePrivateAcceptanceRecord": relative_source is not None,
-        "schemaV4": evidence.get("schemaVersion") == EVIDENCE_SCHEMA_VERSION,
+        # Keep the legacy claim key so already-created schema-v2 attestations
+        # remain verifiable; its value now means a supported local evidence
+        # schema (v4 standalone or v5 transaction-bound).
+        "schemaV4": evidence_schema in EVIDENCE_SCHEMA_VERSIONS,
         "passed": (
             evidence.get("status") == "passed"
             and evidence.get("exitCode") == 0
@@ -474,11 +557,15 @@ def _eligibility(
         "eligible": not reasons,
         "evaluatedAt": _iso8601(datetime.now(timezone.utc)),
         "requiredEvidence": {
-            "schemaVersion": EVIDENCE_SCHEMA_VERSION,
+            "schemaVersion": evidence_schema,
             "mode": "full",
             "profile": "latency",
             "maxAgeDays": EVIDENCE_MAX_AGE_DAYS,
-            "runnerManifestSchemaVersion": 1,
+            "runnerManifestSchemaVersion": (
+                ROLLOUT_RUN_SCHEMA_VERSION
+                if evidence_schema == ROLLOUT_EVIDENCE_SCHEMA_VERSION
+                else 1
+            ),
             "validationInputPolicy": VALIDATION_INPUT_POLICY,
         },
         "checks": checks,
@@ -487,13 +574,14 @@ def _eligibility(
 
 
 def create_draft(paths: ProjectPaths, evidence_path: Path) -> dict[str, Any]:
-    evidence = _private_json(evidence_path)
-    if evidence is None:
+    observed = _private_json_with_sha256(evidence_path, root=paths.root)
+    if observed is None:
         raise ConfigError(
-            "local acceptance evidence must be a private current-user schema-v4 JSON file"
+            "local acceptance evidence must be a private current-user supported JSON file"
         )
-    if evidence.get("schemaVersion") != EVIDENCE_SCHEMA_VERSION:
-        raise ConfigError("reusable attestation requires local acceptance schema v4")
+    evidence, evidence_sha256 = observed
+    if evidence.get("schemaVersion") not in EVIDENCE_SCHEMA_VERSIONS:
+        raise ConfigError("reusable attestation requires local acceptance schema v4 or v5")
     evidence_digest = _evidence_self_hash(evidence)
     if evidence.get("selfSha256") != evidence_digest:
         raise IntegrityError("local acceptance evidence self-hash mismatch")
@@ -503,8 +591,19 @@ def create_draft(paths: ProjectPaths, evidence_path: Path) -> dict[str, Any]:
     if relative_source is None:
         raise ConfigError("reusable attestation source must be logs/acceptance/*.json")
     git = _git_facts(paths)
-    eligibility = _eligibility(paths, evidence_path, evidence, git)
-    subject = _evidence_subject(paths, evidence_path, evidence)
+    eligibility = _eligibility(
+        paths,
+        evidence_path,
+        evidence,
+        git,
+        evidence_sha256=evidence_sha256,
+    )
+    subject = _evidence_subject(
+        paths,
+        evidence_path,
+        evidence,
+        evidence_sha256=evidence_sha256,
+    )
     payload = {
         "schemaVersion": SCHEMA_VERSION,
         "kind": KIND,
@@ -703,7 +802,7 @@ def verify_document(
         or Path(source_path).is_absolute()
         or ".." in Path(source_path).parts
         or not SHA256_PATTERN.fullmatch(str(acceptance.get("sourceSha256", "")))
-        or acceptance.get("schemaVersion") != EVIDENCE_SCHEMA_VERSION
+        or acceptance.get("schemaVersion") not in EVIDENCE_SCHEMA_VERSIONS
         or not SHA256_PATTERN.fullmatch(str(acceptance.get("selfSha256", "")))
         or not SHA256_PATTERN.fullmatch(str(acceptance.get("configurationSha256", "")))
         or not SHA256_PATTERN.fullmatch(
@@ -726,11 +825,16 @@ def verify_document(
         or _parse_time(eligibility.get("evaluatedAt")) is None
         or eligibility.get("requiredEvidence")
         != {
-            "schemaVersion": EVIDENCE_SCHEMA_VERSION,
+            "schemaVersion": acceptance.get("schemaVersion"),
             "mode": "full",
             "profile": "latency",
             "maxAgeDays": EVIDENCE_MAX_AGE_DAYS,
-            "runnerManifestSchemaVersion": 1,
+            "runnerManifestSchemaVersion": (
+                ROLLOUT_RUN_SCHEMA_VERSION
+                if acceptance.get("schemaVersion")
+                == ROLLOUT_EVIDENCE_SCHEMA_VERSION
+                else 1
+            ),
             "validationInputPolicy": VALIDATION_INPUT_POLICY,
         }
         or not isinstance(checks, dict)
@@ -831,14 +935,20 @@ def _current_source_eligibility(
     ignored_paths: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     source_path = paths.root / document["payload"]["acceptance"]["sourcePath"]
-    evidence = _private_json(source_path)
-    if evidence is None:
+    observed = _private_json_with_sha256(source_path, root=paths.root)
+    if observed is None:
         raise IntegrityError("acceptance source is missing or no longer a private regular file")
-    source_sha = _sha256_file(source_path, maximum_bytes=1024 * 1024)
+    evidence, source_sha = observed
     if source_sha != document["payload"]["acceptance"]["sourceSha256"]:
         raise IntegrityError("acceptance source identity changed after the draft was created")
     git = _git_facts(paths, ignored_paths=ignored_paths)
-    current = _eligibility(paths, source_path, evidence, git)
+    current = _eligibility(
+        paths,
+        source_path,
+        evidence,
+        git,
+        evidence_sha256=source_sha,
+    )
     if not current["eligible"]:
         raise IntegrityError(
             "reusable attestation is not currently eligible for signing: "
@@ -855,13 +965,19 @@ def _evidence_subject_recheck(
     source_path = paths.root / document["payload"]["acceptance"]["sourcePath"]
     if not source_path.exists() and not source_path.is_symlink():
         return "unavailable"
-    evidence = _private_json(source_path)
-    if evidence is None:
+    observed = _private_json_with_sha256(source_path, root=paths.root)
+    if observed is None:
         return "failed"
+    evidence, evidence_sha256 = observed
     if evidence.get("selfSha256") != _evidence_self_hash(evidence):
         return "failed"
     try:
-        expected = _evidence_subject(paths, source_path, evidence)
+        expected = _evidence_subject(
+            paths,
+            source_path,
+            evidence,
+            evidence_sha256=evidence_sha256,
+        )
     except IntegrityError:
         return "failed"
     recorded = document["payload"].get("evidenceSubject")

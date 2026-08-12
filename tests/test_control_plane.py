@@ -57,10 +57,13 @@ from local_inference_stack.rollout import (
 )
 from local_inference_stack.runner import RunResult, controlled_environment
 from local_inference_stack.transactions import (
+    QUALIFICATION_RECEIPT_POLICY_ID,
     RECOVERY_DEPLOYMENT_KEYS,
     ROLLOUT_INTENT_POLICY_ID,
+    ROLLOUT_INTENT_POLICY_ID_V2,
     TransactionStore,
     recovery_original_is_safe,
+    verify_completed_upgrade_qualification,
 )
 
 
@@ -519,7 +522,11 @@ class TransactionTests(unittest.TestCase):
     ) -> dict[str, Any]:
         document = plan.document()
         return {
-            "policyId": ROLLOUT_INTENT_POLICY_ID,
+            "policyId": (
+                ROLLOUT_INTENT_POLICY_ID_V2
+                if document["schemaVersion"] == 2
+                else ROLLOUT_INTENT_POLICY_ID
+            ),
             "rollbackSpecSha256": document["rollbackSpecSha256"],
             "sourceCatalogSpecSha256": document[
                 "sourceCatalogSpecSha256"
@@ -531,6 +538,46 @@ class TransactionTests(unittest.TestCase):
             "rolloutPlanSha256": canonical_sha256(document),
             "previousRollbackPointer": previous_pointer,
         }
+
+    @staticmethod
+    def qualification_receipt(binding: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "policyId": QUALIFICATION_RECEIPT_POLICY_ID,
+            "evidencePath": "logs/acceptance/rollout-full.json",
+            "evidenceSha256": "1" * 64,
+            "evidenceSelfSha256": "2" * 64,
+            "runManifestPath": "logs/acceptance/rollout-full.run.json",
+            "runManifestSha256": "3" * 64,
+            "runManifestSelfSha256": "4" * 64,
+            "stepResultsSha256": "5" * 64,
+            "configurationSha256": "6" * 64,
+            "runtimeIdentitySha256": "7" * 64,
+            "rolloutBindingSha256": canonical_sha256(binding),
+        }
+
+    @staticmethod
+    def advance_to_action(
+        store: TransactionStore,
+        document: dict[str, Any],
+        kind: str,
+        *,
+        state: str = "deploying",
+    ) -> dict[str, Any]:
+        plan = document["rolloutIntent"]["rolloutPlan"]
+        while True:
+            current = store.read()
+            assert current is not None
+            ordinal = current["rolloutActionOrdinal"]
+            action = plan["actions"][ordinal]
+            if action["kind"] == kind:
+                return current
+            store.advance_rollout_action(
+                expected_id=document["id"],
+                expected_state=state,
+                expected_action_ordinal=ordinal,
+                expected_action_kind=action["kind"],
+                result_sha256=f"{(ordinal + 1) % 16:x}" * 64,
+            )
 
     def test_interrupted_transaction_is_durable_and_blocks_a_second_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -870,6 +917,264 @@ class TransactionTests(unittest.TestCase):
             )
             self.assertEqual(completed["state"], "completed")
 
+    def test_full_qualification_receipt_is_typed_bound_and_archivable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = TransactionStore(ProjectPaths(Path(directory)))
+            source, target = self.rollout_specs()
+            plan = build_upgrade_rollout_plan(
+                source,
+                target,
+                "a" * 64,
+                admission_granted=True,
+                required_acceptance_tier="full",
+                performance_policy_sha256="d" * 64,
+                modelport_source_identity_sha256="e" * 64,
+                qualification_input_sha256="f" * 64,
+            )
+            document = store.begin_rollout(
+                "upgrade",
+                target.catalog_id,
+                lambda _transaction_id, _created_at: (
+                    self.safe_original(healthy=True),
+                    self.rollout_intent(plan),
+                ),
+                approved_catalog_spec=target.approval_document(),
+            )
+            store.transition(
+                "deploying",
+                expected_id=document["id"],
+                expected_state="planned",
+                expected_action_ordinal=0,
+            )
+            before_quick = self.advance_to_action(store, document, "target-quick")
+            quick_ordinal = before_quick["rolloutActionOrdinal"]
+            store.transition(
+                "accepting",
+                expected_id=document["id"],
+                expected_state="deploying",
+                expected_action_ordinal=quick_ordinal,
+            )
+            store.advance_rollout_action(
+                expected_id=document["id"],
+                expected_state="accepting",
+                expected_action_ordinal=quick_ordinal,
+                expected_action_kind="target-quick",
+                result_sha256="c" * 64,
+            )
+            pending = store.read()
+            assert pending is not None
+            ordinal = pending["rolloutActionOrdinal"]
+            binding = store.pending_rollout_qualification_binding(
+                transaction_id=document["id"],
+                catalog_spec_sha256=target.sha256,
+                catalog_id=target.catalog_id,
+                rollout_subject="target",
+                action_ordinal=ordinal,
+                action_kind="target-full",
+            )
+            self.assertEqual(
+                set(binding),
+                {
+                    "policyId",
+                    "transactionId",
+                    "operation",
+                    "rolloutPlanSha256",
+                    "actionOrdinal",
+                    "actionKind",
+                    "rollbackSpecSha256",
+                    "sourceCatalogSpecSha256",
+                    "targetCatalogSpecSha256",
+                    "performancePolicySha256",
+                    "modelPortSourceIdentitySha256",
+                    "qualificationInputSha256",
+                },
+            )
+            self.assertEqual(binding["performancePolicySha256"], "d" * 64)
+            self.assertEqual(
+                binding["modelPortSourceIdentitySha256"], "e" * 64
+            )
+            self.assertEqual(binding["qualificationInputSha256"], "f" * 64)
+            receipt = self.qualification_receipt(binding)
+            with self.assertRaisesRegex(RecoveryError, "derived"):
+                store.advance_rollout_action(
+                    expected_id=document["id"],
+                    expected_state="accepting",
+                    expected_action_ordinal=ordinal,
+                    expected_action_kind="target-full",
+                    result_sha256="f" * 64,
+                    qualification_evidence=receipt,
+                )
+            with self.assertRaisesRegex(RecoveryError, "binding"):
+                changed = copy.deepcopy(receipt)
+                changed["rolloutBindingSha256"] = "e" * 64
+                store.advance_rollout_action(
+                    expected_id=document["id"],
+                    expected_state="accepting",
+                    expected_action_ordinal=ordinal,
+                    expected_action_kind="target-full",
+                    qualification_evidence=changed,
+                )
+            after_full = store.advance_rollout_action(
+                expected_id=document["id"],
+                expected_state="accepting",
+                expected_action_ordinal=ordinal,
+                expected_action_kind="target-full",
+                qualification_evidence=receipt,
+            )
+            journal = after_full["rolloutActionResults"][ordinal]
+            self.assertEqual(journal["qualificationEvidence"], receipt)
+            self.assertNotEqual(journal["resultSha256"], receipt["evidenceSha256"])
+
+            final_action = plan.document()["actions"][ordinal + 1]
+            store.advance_rollout_action(
+                expected_id=document["id"],
+                expected_state="accepting",
+                expected_action_ordinal=ordinal + 1,
+                expected_action_kind=final_action["kind"],
+                result_sha256="d" * 64,
+            )
+            completed = store.transition(
+                "completed",
+                expected_id=document["id"],
+                expected_state="accepting",
+                expected_action_ordinal=len(plan.actions),
+            )
+            self.assertEqual(
+                verify_completed_upgrade_qualification(
+                    completed,
+                    evidence_path=receipt["evidencePath"],
+                    evidence_self_sha256=receipt["evidenceSelfSha256"],
+                    rollout_binding_sha256=receipt["rolloutBindingSha256"],
+                ),
+                receipt,
+            )
+            malformed = copy.deepcopy(completed)
+            malformed["rolloutActionResults"][ordinal][
+                "qualificationEvidence"
+            ]["unreviewed"] = True
+            with self.assertRaisesRegex(RecoveryError, "receipt"):
+                verify_completed_upgrade_qualification(
+                    malformed,
+                    evidence_path=receipt["evidencePath"],
+                    evidence_self_sha256=receipt["evidenceSelfSha256"],
+                    rollout_binding_sha256=receipt["rolloutBindingSha256"],
+                )
+            wrong_result = copy.deepcopy(completed)
+            wrong_result["rolloutActionResults"][ordinal]["resultSha256"] = "f" * 64
+            with self.assertRaisesRegex(RecoveryError, "result"):
+                verify_completed_upgrade_qualification(
+                    wrong_result,
+                    evidence_path=receipt["evidencePath"],
+                    evidence_self_sha256=receipt["evidenceSelfSha256"],
+                    rollout_binding_sha256=receipt["rolloutBindingSha256"],
+                )
+            store.begin("release", "quick", self.safe_original())
+            self.assertEqual(store.read_by_id(document["id"]), completed)
+            self.assertEqual(
+                store.completed_upgrade_qualification(
+                    document["id"],
+                    evidence_path=receipt["evidencePath"],
+                    evidence_self_sha256=receipt["evidenceSelfSha256"],
+                    rollout_binding_sha256=receipt["rolloutBindingSha256"],
+                ),
+                receipt,
+            )
+            substituted_id = "00000000-0000-4000-8000-000000000000"
+            substituted_path = store.archive_path(substituted_id)
+            substituted_path.write_text(
+                json.dumps(completed, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            substituted_path.chmod(0o600)
+            with self.assertRaisesRegex(RecoveryError, "requested id"):
+                store.read_by_id(substituted_id)
+
+    def test_full_qualification_rejects_policy_shape_receipt_and_terminal_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = ProjectPaths(Path(directory))
+            store = TransactionStore(paths)
+            source, target = self.rollout_specs()
+            plan = build_upgrade_rollout_plan(
+                source,
+                target,
+                "a" * 64,
+                admission_granted=True,
+                required_acceptance_tier="full",
+                performance_policy_sha256="d" * 64,
+                modelport_source_identity_sha256="e" * 64,
+                qualification_input_sha256="f" * 64,
+            )
+            wrong_policy = self.rollout_intent(plan)
+            wrong_policy["policyId"] = ROLLOUT_INTENT_POLICY_ID
+            with self.assertRaisesRegex(RecoveryError, "policy"):
+                store.begin(
+                    "upgrade",
+                    target.catalog_id,
+                    self.safe_original(),
+                    approved_catalog_spec=target.approval_document(),
+                    rollout_intent=wrong_policy,
+                )
+
+            document = store.begin_rollout(
+                "upgrade",
+                target.catalog_id,
+                lambda _transaction_id, _created_at: (
+                    self.safe_original(), self.rollout_intent(plan)
+                ),
+                approved_catalog_spec=target.approval_document(),
+            )
+            store.transition(
+                "deploying",
+                expected_id=document["id"],
+                expected_state="planned",
+                expected_action_ordinal=0,
+            )
+            with self.assertRaisesRegex(RecoveryError, "target-full"):
+                store.pending_rollout_qualification_binding(
+                    transaction_id=document["id"],
+                    catalog_spec_sha256=source.sha256,
+                    catalog_id=source.catalog_id,
+                    rollout_subject="source",
+                    action_ordinal=0,
+                    action_kind="source-quick",
+                )
+            with self.assertRaisesRegex(RecoveryError, "only target-full"):
+                store.advance_rollout_action(
+                    expected_id=document["id"],
+                    expected_state="deploying",
+                    expected_action_ordinal=0,
+                    expected_action_kind="source-quick",
+                    result_sha256="b" * 64,
+                    qualification_evidence={"untrusted": True},
+                )
+            store.transition(
+                "recovery_required",
+                expected_id=document["id"],
+                expected_state="deploying",
+                expected_action_ordinal=0,
+                detail="qualification did not start",
+            )
+            store.transition(
+                "production_restoring",
+                expected_id=document["id"],
+                expected_state="recovery_required",
+                expected_action_ordinal=0,
+            )
+            restored = store.transition(
+                "failed-restored",
+                expected_id=document["id"],
+                expected_state="production_restoring",
+                expected_action_ordinal=0,
+                detail="source restored exactly",
+            )
+            with self.assertRaisesRegex(RecoveryError, "completed"):
+                verify_completed_upgrade_qualification(
+                    restored,
+                    evidence_path="logs/acceptance/rollout-full.json",
+                    evidence_self_sha256="2" * 64,
+                    rollout_binding_sha256="3" * 64,
+                )
+
     def test_rollout_failure_can_enter_recovery_required_at_pending_action(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = TransactionStore(ProjectPaths(Path(directory)))
@@ -1013,7 +1318,10 @@ class TransactionTests(unittest.TestCase):
                     "LOCAL_INFERENCE_ROLLOUT_ACTION_KIND": "source-quick",
                 },
             )
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertNotEqual(accepted.returncode, 0)
+            self.assertIn(
+                "runtime mutation purpose is not authorized", accepted.stderr
+            )
 
             store.transition(
                 "recovery_required",
@@ -1043,6 +1351,65 @@ class TransactionTests(unittest.TestCase):
             )
             self.assertNotEqual(revoked.returncode, 0)
             self.assertIn("recovering rollout", revoked.stderr)
+
+    def test_shell_rollout_gate_allows_only_the_matching_runtime_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = TransactionStore(ProjectPaths(root))
+            source, target = self.rollout_specs()
+            plan = build_upgrade_rollout_plan(
+                source, target, "a" * 64, admission_granted=True
+            )
+            document = store.begin_rollout(
+                "upgrade",
+                target.catalog_id,
+                lambda _transaction_id, _created_at: (
+                    self.safe_original(),
+                    self.rollout_intent(plan),
+                ),
+                approved_catalog_spec=target.approval_document(),
+            )
+            pending = self.advance_to_action(
+                store, document, "stop-source", state="planned"
+            )
+            ordinal = pending["rolloutActionOrdinal"]
+            environment = {
+                **os.environ,
+                "QWEN_CONTROL_TRANSACTION_ID": document["id"],
+                "QWEN_CATALOG_ID": source.catalog_id,
+                "LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256": source.sha256,
+                "LOCAL_INFERENCE_ROLLOUT_SUBJECT": "source",
+                "LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL": str(ordinal),
+                "LOCAL_INFERENCE_ROLLOUT_ACTION_KIND": "stop-source",
+            }
+            library = ROOT / "scripts" / "lib" / "deployment.sh"
+            accepted = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f"source {library}; acquire_runtime_lock {root} stop",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=environment,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            rejected = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f"source {library}; acquire_runtime_lock {root} start",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=environment,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(
+                "runtime mutation purpose is not authorized", rejected.stderr
+            )
 
     def test_rollback_requires_pointer_bound_to_the_immutable_anchor(self) -> None:
         current, anchor = self.rollout_specs()
@@ -2000,6 +2367,25 @@ TransactionStore(ProjectPaths(Path(sys.argv[2]))).begin("deploy", "model", {})
 
 class AttestationTests(unittest.TestCase):
     NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+
+    def test_attestation_evidence_reader_rejects_ancestor_symlink_escape(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as outside_directory,
+        ):
+            root = Path(directory)
+            outside = Path(outside_directory)
+            (outside / "acceptance").mkdir(mode=0o700)
+            evidence = outside / "acceptance" / "evidence.json"
+            evidence.write_text('{"outside":true}\n', encoding="utf-8")
+            evidence.chmod(0o600)
+            (root / "logs").symlink_to(outside, target_is_directory=True)
+            self.assertIsNone(
+                attestation._private_json(
+                    root / "logs" / "acceptance" / "evidence.json",
+                    root=root,
+                )
+            )
 
     def _document(self, *, eligible: bool = True) -> dict:
         checks = {key: True for key in attestation.ELIGIBILITY_CHECKS}

@@ -4,11 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT_DIR / "src"))
+
+from local_inference_stack.materials import MaterialError, read_file_bytes  # noqa: E402
 
 try:
     import tomllib
@@ -16,17 +24,23 @@ except ModuleNotFoundError as error:  # pragma: no cover - depends on host Pytho
     raise SystemExit("compatibility-check.py requires Python 3.11 or newer") from error
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT = ROOT_DIR / "contracts" / "local-qwen-provider-v1.json"
 DEFAULT_MANIFEST = (
     ROOT_DIR / "deployments" / "qwen3.5-9b-rtx5070ti" / "manifest.json"
 )
 
 
-def load_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+def read_material(path: Path, *, maximum_bytes: int) -> bytes:
+    try:
+        return read_file_bytes(path, maximum_bytes=maximum_bytes)
+    except MaterialError as error:
+        raise ValueError(f"cannot safely read material: {path}") from error
+
+
+def load_json_bytes(body: bytes, *, label: str) -> dict[str, Any]:
+    value = json.loads(body.decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object")
+        raise ValueError(f"{label} must contain a JSON object")
     return value
 
 
@@ -165,16 +179,12 @@ def evaluate_contract(
 
 
 def evaluate_governance_source(
-    contract: dict[str, Any], modelport_project: Path
+    contract: dict[str, Any], source_bodies: dict[str, bytes]
 ) -> list[dict[str, Any]]:
     governance = contract["governance"]
-    source_paths = [
-        modelport_project / "src" / "governance.rs",
-        modelport_project / "src" / "routes.rs",
-    ]
     source = "\n".join(
-        path.read_text(encoding="utf-8") if path.is_file() else ""
-        for path in source_paths
+        source_bodies[path].decode("utf-8")
+        for path in ("src/governance.rs", "src/routes.rs")
     )
     expected_fragments = {
         "routing request header": governance["routingModeHeader"],
@@ -224,21 +234,31 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    modelport_project = args.modelport_project.resolve()
+    modelport_project = Path(os.path.abspath(os.fspath(args.modelport_project)))
+    try:
+        if modelport_project.resolve(strict=True) != modelport_project:
+            raise SystemExit("ModelPort project must not traverse symbolic links")
+    except OSError as error:
+        raise SystemExit("ModelPort project is unavailable") from error
     config_path = args.modelport_config or Path("config.toml")
     if not config_path.is_absolute():
         config_path = modelport_project / config_path
-    config_path = config_path.resolve()
-    if not config_path.is_file():
-        raise SystemExit(f"ModelPort config not found: {config_path}")
+    config_path = Path(os.path.abspath(os.fspath(config_path)))
 
-    contract = load_json(args.contract)
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    contract_body = read_material(args.contract, maximum_bytes=1024 * 1024)
+    config_body = read_material(config_path, maximum_bytes=16 * 1024 * 1024)
+    governance_bodies = {
+        path: read_material(modelport_project / path, maximum_bytes=16 * 1024 * 1024)
+        for path in ("src/governance.rs", "src/routes.rs")
+    }
+    contract = load_json_bytes(contract_body, label="provider contract")
+    config = tomllib.loads(config_body.decode("utf-8"))
     checks = evaluate_contract(contract, config)
-    checks.extend(evaluate_governance_source(contract, modelport_project))
+    checks.extend(evaluate_governance_source(contract, governance_bodies))
 
     if args.release:
-        manifest = load_json(args.manifest)
+        manifest_body = read_material(args.manifest, maximum_bytes=16 * 1024 * 1024)
+        manifest = load_json_bytes(manifest_body, label="deployment manifest")
         expected_commit = manifest["gateway"]["sourceCommit"]
         actual_commit = git_output(modelport_project, "rev-parse", "HEAD")
         modelport_status = git_output(modelport_project, "status", "--porcelain=v1")
@@ -273,6 +293,14 @@ def main() -> int:
         "mode": "release" if args.release else "configuration",
         "status": "passed" if not failed else "failed",
         "summary": {"passed": len(checks) - len(failed), "failed": len(failed)},
+        "materialIdentity": {
+            "contractSha256": hashlib.sha256(contract_body).hexdigest(),
+            "configSha256": hashlib.sha256(config_body).hexdigest(),
+            "governanceSha256": {
+                path: hashlib.sha256(body).hexdigest()
+                for path, body in sorted(governance_bodies.items())
+            },
+        },
         "inputs": {
             "contract": str(args.contract.resolve()),
             "modelportProject": str(modelport_project),

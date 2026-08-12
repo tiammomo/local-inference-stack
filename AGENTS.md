@@ -27,7 +27,8 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 6. Record genuinely reusable host validation as a deployment manifest under
    `deployments/`; do not relabel estimates as validated.
 7. Treat `validated-on-this-host` as valid only when `hostAcceptanceEvidence`
-   points to a fresh, secure, matching schema v4 record. Hardware-profile
+   points to a fresh, secure, matching standalone schema v4 record or a schema
+   v5 record backed by its exact completed upgrade receipt. Hardware-profile
    similarity alone is not host acceptance, and a busy running GPU may still
    make `readyToDeploy` false.
 
@@ -35,9 +36,11 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 
 - Inspect `./stack upgrade --model CATALOG_ID` or `./stack rollback` first. The
   commands are read-only without `--yes`; upgrade shows the admitted source,
-  target, scope, and caveats, while rollback also shows its verified pointer and
-  typed plan. Present those facts before asking for approval.
-- Only `./stack upgrade --model CATALOG_ID --yes` and `./stack rollback --yes`
+  target, scope, selected qualification tier, and caveats, while rollback also
+  shows its verified pointer and typed plan. Present those facts before asking
+  for approval.
+- Only `./stack upgrade --model CATALOG_ID [--qualification {quick,full}] --yes`
+  and `./stack rollback --yes`
   may execute the typed maintenance-window lifecycle. Do not call internal
   replacement flags or runtime adapters directly.
 - Rollback spec v1 is deliberately limited to
@@ -51,6 +54,18 @@ home directory, parent directory, GPU, or adjacent ModelPort checkout.
 - Upgrade and rollback run `quick --no-record` inside the transaction as a
   service gate. That check creates no reusable host evidence, does not qualify
   a model, and does not promote a Catalog entry.
+- Upgrade defaults to `--qualification quick`, preserving the v1 rollout plan.
+  `--qualification full` is a v2 rollout plan with a distinct `target-full`
+  action before rollback publication. It requires an absolute, current-user,
+  clean ModelPort checkout whose live loopback build has the same Git identity.
+  The passed schema v5 evidence is useful only after the exact completed
+  transaction receipt resolves; a failed, restored, pending, substituted, or
+  manually copied record is not qualification authority.
+- Do not run transaction-bound full acceptance through
+  `scripts/acceptance-suite.sh` directly. The public upgrade command supplies
+  the pending action authority and deterministic evidence identity. Standalone
+  schema v4 acceptance remains a local compatibility path, not a substitute
+  for a missing v5 rollout receipt.
 - The current executable Catalog contains only one provisional entry,
   so no real upgrade pair or rollback anchor is eligible. This is expected to
   fail closed; never manufacture an entry, pointer, evidence file, or local

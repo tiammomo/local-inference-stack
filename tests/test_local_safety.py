@@ -16,6 +16,7 @@ from scripts.env_utils import (
     atomic_write_private_text,
     is_private_regular_file,
     parse_env_file,
+    read_private_env_values,
 )
 from scripts.local_http import is_loopback_host, validate_loopback_url
 
@@ -94,6 +95,131 @@ class EnvironmentTests(unittest.TestCase):
             self.assertTrue(is_private_regular_file(target))
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
             self.assertEqual(target.stat().st_uid, os.getuid())
+
+    def test_private_credential_reader_filters_and_rejects_unsafe_inodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "credentials.env"
+            target.write_text(
+                "MODELPORT_AUTH_TOKEN='token value'\n"
+                "MODELPORT_BASE_URL=http://attacker.invalid\n"
+                "BENCHMARK_TOKENS=1\n",
+                encoding="utf-8",
+            )
+            target.chmod(0o600)
+            self.assertEqual(
+                read_private_env_values(
+                    target, allowed_keys={"MODELPORT_AUTH_TOKEN"}
+                ),
+                {"MODELPORT_AUTH_TOKEN": "token value"},
+            )
+
+            target.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                read_private_env_values(
+                    target, allowed_keys={"MODELPORT_AUTH_TOKEN"}
+                )
+            target.chmod(0o600)
+            hardlink = root / "credentials-copy.env"
+            os.link(target, hardlink)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                read_private_env_values(
+                    target, allowed_keys={"MODELPORT_AUTH_TOKEN"}
+                )
+            hardlink.unlink()
+            symlink = root / "credentials-link.env"
+            symlink.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "safely read"):
+                read_private_env_values(
+                    symlink, allowed_keys={"MODELPORT_AUTH_TOKEN"}
+                )
+
+    def test_acceptance_children_receive_no_rollout_mutation_authority(self) -> None:
+        script = ROOT_DIR / "scripts" / "acceptance-suite.sh"
+        program = f"""
+set -euo pipefail
+source {script} help >/dev/null
+BOUND_QUALIFICATION=true
+export QWEN_CONTROL_TRANSACTION_ID=00000000-0000-4000-8000-000000000001
+export LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256={'a' * 64}
+export LOCAL_INFERENCE_ROLLOUT_SUBJECT=target
+export LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL=6
+export LOCAL_INFERENCE_ROLLOUT_ACTION_KIND=target-full
+export LOCAL_INFERENCE_RUNTIME_PULL_POLICY=never
+export QWEN_RUNTIME_LOCK_HELD=1
+export LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN={'b' * 64}
+run_acceptance_child python3 - <<'PY'
+import json
+import os
+
+keys = (
+    "QWEN_CONTROL_TRANSACTION_ID",
+    "LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256",
+    "LOCAL_INFERENCE_ROLLOUT_SUBJECT",
+    "LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL",
+    "LOCAL_INFERENCE_ROLLOUT_ACTION_KIND",
+    "LOCAL_INFERENCE_RUNTIME_PULL_POLICY",
+    "QWEN_RUNTIME_LOCK_HELD",
+    "LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN",
+)
+print(json.dumps({{key: os.environ.get(key) for key in keys}}))
+print(os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION"))
+PY
+"""
+        result = subprocess.run(
+            ["bash", "-c", program],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        lines = result.stdout.strip().splitlines()
+        self.assertTrue(all(value is None for value in json.loads(lines[-2]).values()))
+        self.assertEqual(lines[-1], "1")
+
+    def test_private_token_loader_scrubs_rollout_authority_before_parser(self) -> None:
+        library = ROOT_DIR / "scripts" / "lib" / "deployment.sh"
+        program = f"""
+set -euo pipefail
+source {library}
+export QWEN_CONTROL_TRANSACTION_ID=00000000-0000-4000-8000-000000000001
+export LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256={'a' * 64}
+export LOCAL_INFERENCE_ROLLOUT_SUBJECT=target
+export LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL=6
+export LOCAL_INFERENCE_ROLLOUT_ACTION_KIND=target-full
+export LOCAL_INFERENCE_RUNTIME_PULL_POLICY=never
+export QWEN_RUNTIME_LOCK_HELD=1
+export LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN={'b' * 64}
+export MODELPORT_AUTH_TOKEN=ambient-secret
+python3() {{
+  local key
+  for key in \
+    QWEN_CONTROL_TRANSACTION_ID \
+    LOCAL_INFERENCE_APPROVED_CATALOG_SPEC_SHA256 \
+    LOCAL_INFERENCE_ROLLOUT_SUBJECT \
+    LOCAL_INFERENCE_ROLLOUT_ACTION_ORDINAL \
+    LOCAL_INFERENCE_ROLLOUT_ACTION_KIND \
+    LOCAL_INFERENCE_RUNTIME_PULL_POLICY \
+    QWEN_RUNTIME_LOCK_HELD \
+    LOCAL_INFERENCE_ACCEPTANCE_RUN_TOKEN \
+    MODELPORT_AUTH_TOKEN; do
+    [[ -z "${{!key+x}}" ]] || return 41
+  done
+  printf isolated-token
+}}
+load_private_modelport_token {ROOT_DIR} /unused/private.env
+[[ "$MODELPORT_AUTH_TOKEN" == isolated-token ]]
+"""
+        result = subprocess.run(
+            ["bash", "-c", program],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class ManifestTests(unittest.TestCase):

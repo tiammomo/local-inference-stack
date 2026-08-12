@@ -84,13 +84,22 @@ upgrade 则在同一持久事务中停止源、启动目标并在成功后发布
 - active rollback pointer 只在 upgrade 目标 quick 成功且锚点再次验证后发布，在 rollback quick
   成功后以单调 tombstone 清除。pointer CAS 与 transaction recovery 共同关闭进程中断窗口。
 - rollout 中的 `quick --no-record` 只是服务门禁，不产生 host acceptance 或 qualification 结论；
-  Catalog 晋级仍要求独立可信 full evidence。
+  默认 quick rollout 保持 plan v1。full rollout 的 plan v2 在 pointer 发布前增加 `target-full`。
+- `target-full` 把 schema v2 run manifest 与 schema v5 evidence 固定到 transaction、plan、action、
+  source/target/rollback spec、controller materials、acceptance configuration、精确容器进程与 clean
+  ModelPort source/live identity。逐步重检后，控制面只能为当前 pending action 写入派生 receipt；
+  consumers 还会反向要求 exact completed upgrade。passed JSON、失败/恢复事务或复制件都没有独立
+  qualification authority。
+- ModelPort source identity v2 要求 live `/livez build.configSha256` 与受审 config 精确相等；
+  compatibility 绑定 raw contract/config/governance 摘要。authenticated registry 只证明 logical
+  alias/provider 暴露关系，不声称证明 physical target；Tool gate 固定 `local_strict`。任一身份无法
+  证明时，full 必须在事务或 source 停机前拒绝。
 - 恢复记录只保存 allowlisted 结构化 Profile 值和完整运行身份，不保存稍后会被 shell `source` 的
   原始文本。健康原实例缺少身份哈希时禁止自动恢复。
 - 本机 schema 各自声明可读版本；旧 Profile/transaction 与纯制品 bundle 有受限兼容，旧 attestation
   因信任语义不足而拒绝。任何现场处理都必须显式批准并保留回滚，不允许静默重写。
 
-当前实现是 Phase B 的类型化基础，不是 Phase B 终态。还需要把 full qualification runner 的完整
-记录和结论绑定到同一 rollout transaction，在合法 validated rollback/LTS 模型对上完成 Tier-1
+当前实现已经完成 Phase B 的 transaction-bound full qualification 代码切片，但不是 Phase B 终态。
+还需要在合法 validated rollback/LTS 模型对上完成 Tier-1
 真实 upgrade→rollback drill，并验证 WSL shutdown/reboot、Docker 延迟就绪和事务重入。当前
 Catalog 只有 provisional 条目，因此这些真实 rollout 会按设计 fail closed；不能以手写锚点绕过。

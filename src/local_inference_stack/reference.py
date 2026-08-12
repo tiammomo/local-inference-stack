@@ -75,11 +75,11 @@ COMMAND_DETAILS = (
     },
     {
         "path": "upgrade",
-        "syntax": "./stack upgrade --model CATALOG_ID [--yes] [--json]",
-        "state": "默认只读；--yes 在单 runtime 维护窗口中下载、停止、替换并 quick smoke",
+        "syntax": "./stack upgrade --model CATALOG_ID [--qualification {quick,full}] [--yes] [--json]",
+        "state": "默认只读；--yes 在单 runtime 维护窗口中下载、停止、替换并执行所选门禁",
         "approval": "执行时必须 --yes，source/target/host/attestation 均须准入",
-        "description": "仅支持同一 controller、同一 Catalog、本机已有恢复材料的类型化升级；不会自动晋级 Catalog。",
-        "example": "./stack upgrade --model CATALOG_ID --json",
+        "description": "默认 quick 仅作服务门禁；显式 full 将事务绑定 qualification 放在 rollback pointer 发布前，仍不会自动晋级 Catalog。",
+        "example": "MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort ./stack upgrade --model CATALOG_ID --qualification full --json",
     },
     {
         "path": "rollback",

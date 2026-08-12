@@ -2,25 +2,36 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${MODELPORT_ENV_FILE:-$ROOT_DIR/profiles/operations.secrets.env}"
+ENV_FILE="$ROOT_DIR/profiles/operations.secrets.env"
 # shellcheck source=scripts/lib/deployment.sh
 source "$ROOT_DIR/scripts/lib/deployment.sh"
 load_deployment_env "$ROOT_DIR"
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+if [[ "${LOCAL_INFERENCE_BOUND_QUALIFICATION:-}" == "1" ]]; then
+  ENV_FILE="${MODELPORT_ENV_FILE:?Bound ModelPort credential capability is required}"
+  QWEN_SERVED_MODEL_ID="${LOCAL_INFERENCE_SERVED_MODEL_ID:?}"
+  CODE_MODEL="${LOCAL_INFERENCE_LOGICAL_CODE_MODEL:?}"
+else
+  ENV_FILE="${MODELPORT_ENV_FILE:-$ENV_FILE}"
+  CODE_MODEL="qwen3.5-code"
+fi
+if [[ -f "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+  load_private_modelport_token "$ROOT_DIR" "$ENV_FILE"
 fi
 
 : "${MODELPORT_AUTH_TOKEN:?MODELPORT_AUTH_TOKEN is required}"
-MODELPORT_ENDPOINT="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"
-QWEN_ENDPOINT="${QWEN_BASE_URL:-http://127.0.0.1:18080}"
+if [[ "${LOCAL_INFERENCE_BOUND_QUALIFICATION:-}" == "1" ]]; then
+  MODELPORT_ENDPOINT="http://127.0.0.1:38082"
+  QWEN_ENDPOINT="http://127.0.0.1:18080"
+else
+  MODELPORT_ENDPOINT="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"
+  QWEN_ENDPOINT="${QWEN_BASE_URL:-http://127.0.0.1:18080}"
+fi
 
-python3 - "$TEMP_DIR/direct-request.json" "$TEMP_DIR/modelport-request.json" "$QWEN_SERVED_MODEL_ID" <<'PY'
+python3 - "$TEMP_DIR/direct-request.json" "$TEMP_DIR/modelport-request.json" \
+  "$QWEN_SERVED_MODEL_ID" "$CODE_MODEL" <<'PY'
 import json
 import pathlib
 import sys
@@ -38,11 +49,11 @@ base = {
         },
     }],
 }
-for path, model in zip(sys.argv[1:3], (sys.argv[3], "qwen3.5-code")):
+for path, model in zip(sys.argv[1:3], (sys.argv[3], sys.argv[4])):
     payload = {"model": model, **base}
     # ModelPort's local_qwen policy defaults logical code requests to
     # enable_thinking=true. Count the equivalent rendered direct template.
-    if model != "qwen3.5-code":
+    if model != sys.argv[4]:
         payload["chat_template_kwargs"] = {"enable_thinking": True}
     pathlib.Path(path).write_text(json.dumps(payload, ensure_ascii=False))
 PY

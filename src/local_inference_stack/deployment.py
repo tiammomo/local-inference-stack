@@ -21,6 +21,9 @@ from .materials import canonical_sha256
 
 
 SCHEMA_VERSION = 1
+ROLLOUT_QUALIFICATION_POLICY_ID = (
+    "local-inference-stack/transaction-bound-full-qualification-v1"
+)
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -407,6 +410,7 @@ class RolloutActionKind(str, Enum):
     ACTIVATE_TARGET = "activate-target"
     START_TARGET = "start-target"
     TARGET_QUICK = "target-quick"
+    TARGET_FULL = "target-full"
     PUBLISH_ROLLBACK = "publish-rollback"
     CLEAR_ROLLBACK = "clear-rollback"
 
@@ -432,6 +436,84 @@ class RolloutAction:
 
 
 @dataclass(frozen=True, slots=True)
+class RolloutQualification:
+    """Exact reusable-evidence requirement carried only by rollout plan v2."""
+
+    performance_policy_sha256: str
+    modelport_source_identity_sha256: str
+    qualification_input_sha256: str
+    policy_id: str = ROLLOUT_QUALIFICATION_POLICY_ID
+    mode: str = "full"
+    profile: str = "latency"
+    record_evidence: bool = True
+    run_schema_version: int = 2
+    evidence_schema_version: int = 5
+
+    def __post_init__(self) -> None:
+        _sha256(self.performance_policy_sha256, "performance policy SHA256")
+        _sha256(
+            self.modelport_source_identity_sha256,
+            "ModelPort source identity SHA256",
+        )
+        _sha256(self.qualification_input_sha256, "qualification input SHA256")
+        if (
+            self.policy_id != ROLLOUT_QUALIFICATION_POLICY_ID
+            or self.mode != "full"
+            or self.profile != "latency"
+            or self.record_evidence is not True
+            or self.run_schema_version != 2
+            or self.evidence_schema_version != 5
+        ):
+            raise DeploymentSpecError("invalid rollout qualification contract")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "policyId": self.policy_id,
+            "mode": self.mode,
+            "profile": self.profile,
+            "recordEvidence": self.record_evidence,
+            "runSchemaVersion": self.run_schema_version,
+            "evidenceSchemaVersion": self.evidence_schema_version,
+            "performancePolicySha256": self.performance_policy_sha256,
+            "modelPortSourceIdentitySha256": (
+                self.modelport_source_identity_sha256
+            ),
+            "qualificationInputSha256": self.qualification_input_sha256,
+        }
+
+    @classmethod
+    def from_document(cls, value: Any) -> RolloutQualification:
+        if not isinstance(value, dict) or set(value) != {
+            "policyId",
+            "mode",
+            "profile",
+            "recordEvidence",
+            "runSchemaVersion",
+            "evidenceSchemaVersion",
+            "performancePolicySha256",
+            "modelPortSourceIdentitySha256",
+            "qualificationInputSha256",
+        }:
+            raise DeploymentSpecError("invalid rollout qualification shape")
+        qualification = cls(
+            performance_policy_sha256=value.get("performancePolicySha256"),
+            modelport_source_identity_sha256=value.get(
+                "modelPortSourceIdentitySha256"
+            ),
+            qualification_input_sha256=value.get("qualificationInputSha256"),
+            policy_id=value.get("policyId"),
+            mode=value.get("mode"),
+            profile=value.get("profile"),
+            record_evidence=value.get("recordEvidence"),
+            run_schema_version=value.get("runSchemaVersion"),
+            evidence_schema_version=value.get("evidenceSchemaVersion"),
+        )
+        if qualification.document() != value:
+            raise DeploymentSpecError("invalid rollout qualification contract")
+        return qualification
+
+
+@dataclass(frozen=True, slots=True)
 class RolloutPlan:
     """One exact ordered upgrade or rollback intent.
 
@@ -447,10 +529,12 @@ class RolloutPlan:
     actions: tuple[RolloutAction, ...]
     required_acceptance_tier: str = "quick"
     requires_approval: bool = True
+    schema_version: int = 1
+    qualification: RolloutQualification | None = None
 
     def document(self) -> dict[str, Any]:
-        return {
-            "schemaVersion": 1,
+        document = {
+            "schemaVersion": self.schema_version,
             "operation": self.operation,
             "rollbackSpecSha256": self.rollback_spec_sha256,
             "sourceCatalogSpecSha256": self.source_catalog_spec_sha256,
@@ -459,6 +543,9 @@ class RolloutPlan:
             "requiresApproval": self.requires_approval,
             "actions": [action.document() for action in self.actions],
         }
+        if self.qualification is not None:
+            document["qualification"] = self.qualification.document()
+        return document
 
     @property
     def sha256(self) -> str:
@@ -471,14 +558,48 @@ def build_upgrade_rollout_plan(
     rollback_spec_sha256: str,
     *,
     admission_granted: bool,
+    required_acceptance_tier: str = "quick",
+    performance_policy_sha256: str | None = None,
+    modelport_source_identity_sha256: str | None = None,
+    qualification_input_sha256: str | None = None,
 ) -> RolloutPlan:
-    """Build the v1 single-runtime upgrade sequence."""
+    """Build an admitted single-runtime upgrade sequence.
+
+    Quick keeps the original v1 wire document.  Full qualification is a v2
+    plan because it adds both an exact evidence contract and a distinct typed
+    action; a stronger label can therefore never be attached to v1 actions.
+    """
 
     if not admission_granted:
         raise DeploymentSpecError("upgrade actions require explicit admission")
     _sha256(rollback_spec_sha256, "rollback spec SHA256")
     if source.catalog_id == target.catalog_id or source.sha256 == target.sha256:
         raise DeploymentSpecError("upgrade source and target must be distinct")
+    if required_acceptance_tier not in {"quick", "full"}:
+        raise DeploymentSpecError("upgrade acceptance tier must be quick or full")
+    qualification: RolloutQualification | None = None
+    if required_acceptance_tier == "full":
+        if (
+            performance_policy_sha256 is None
+            or modelport_source_identity_sha256 is None
+            or qualification_input_sha256 is None
+        ):
+            raise DeploymentSpecError(
+                "full upgrade requires performance policy and ModelPort source identities"
+            )
+        qualification = RolloutQualification(
+            performance_policy_sha256=performance_policy_sha256,
+            modelport_source_identity_sha256=modelport_source_identity_sha256,
+            qualification_input_sha256=qualification_input_sha256,
+        )
+    elif (
+        performance_policy_sha256 is not None
+        or modelport_source_identity_sha256 is not None
+        or qualification_input_sha256 is not None
+    ):
+        raise DeploymentSpecError(
+            "quick upgrade cannot carry full qualification identities"
+        )
     actions: list[RolloutAction] = [
         RolloutAction(0, RolloutActionKind.SOURCE_QUICK, "source", source.catalog_id)
     ]
@@ -516,12 +637,23 @@ def build_upgrade_rollout_plan(
                 "target",
                 target.catalog_id,
             ),
+        )
+    )
+    if required_acceptance_tier == "full":
+        actions.append(
             RolloutAction(
-                len(actions) + 4,
-                RolloutActionKind.PUBLISH_ROLLBACK,
-                "source",
-                source.catalog_id,
-            ),
+                len(actions),
+                RolloutActionKind.TARGET_FULL,
+                "target",
+                target.catalog_id,
+            )
+        )
+    actions.append(
+        RolloutAction(
+            len(actions),
+            RolloutActionKind.PUBLISH_ROLLBACK,
+            "source",
+            source.catalog_id,
         )
     )
     return RolloutPlan(
@@ -530,6 +662,9 @@ def build_upgrade_rollout_plan(
         source.sha256,
         target.sha256,
         tuple(actions),
+        required_acceptance_tier=required_acceptance_tier,
+        schema_version=2 if required_acceptance_tier == "full" else 1,
+        qualification=qualification,
     )
 
 
@@ -572,7 +707,16 @@ def parse_rollout_plan(
 ) -> RolloutPlan:
     """Validate an untrusted rollout plan by exact reconstruction."""
 
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict):
+        raise DeploymentSpecError("rollout plan has an invalid shape")
+    schema_version = value.get("schemaVersion")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in {1, 2}
+    ):
+        raise DeploymentSpecError("rollout plan has an invalid schema")
+    expected_keys = {
         "schemaVersion",
         "operation",
         "rollbackSpecSha256",
@@ -581,9 +725,17 @@ def parse_rollout_plan(
         "requiredAcceptanceTier",
         "requiresApproval",
         "actions",
-    }:
+    }
+    if schema_version == 2:
+        expected_keys.add("qualification")
+    if set(value) != expected_keys:
         raise DeploymentSpecError("rollout plan has an invalid shape")
     operation = value.get("operation")
+    qualification = (
+        RolloutQualification.from_document(value.get("qualification"))
+        if schema_version == 2
+        else None
+    )
     if operation == "upgrade":
         if source is None:
             raise DeploymentSpecError("upgrade plan requires its source spec")
@@ -592,6 +744,26 @@ def parse_rollout_plan(
             target,
             rollback_spec_sha256,
             admission_granted=True,
+            required_acceptance_tier=(
+                "full"
+                if schema_version == 2
+                else "quick"
+            ),
+            performance_policy_sha256=(
+                qualification.performance_policy_sha256
+                if qualification is not None
+                else None
+            ),
+            modelport_source_identity_sha256=(
+                qualification.modelport_source_identity_sha256
+                if qualification is not None
+                else None
+            ),
+            qualification_input_sha256=(
+                qualification.qualification_input_sha256
+                if qualification is not None
+                else None
+            ),
         )
     elif operation == "rollback":
         if source is None:

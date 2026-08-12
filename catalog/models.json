@@ -47,6 +47,10 @@
       },
       "modelDirectory": "qwen3.5-9b",
       "servedModelId": "qwen3.5-9b-q5km",
+      "performancePolicy": {
+        "schemaVersion": 1,
+        "manifestPath": "deployments/qwen3.5-9b-rtx5070ti/manifest.json"
+      },
       "requirements": {
         "minVramGiB": 12,
         "recommendedVramGiB": 16,

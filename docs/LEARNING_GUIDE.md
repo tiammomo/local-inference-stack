@@ -111,9 +111,11 @@ GPU 显存大致由以下部分共同消耗：
 | `estimated` | Catalog 中的保守估算，必须在目标主机重新验收 |
 | `provisional` | 有历史实机资料但不满足当前新部署/晋级门禁 |
 | `validated-hardware-profile-match` | 当前硬件类似已有验证档案，但还不是本机验收 |
-| `validated-on-this-host` | 新鲜的 schema v4 证据与当前主机、制品、镜像、有效 Compose 和实际容器配置全部匹配 |
+| `validated-on-this-host` | 新鲜的 standalone schema v4 证据，或带 exact completed upgrade receipt 的 schema v5 证据，与当前主机、制品、镜像、有效 Compose 和实际容器配置全部匹配 |
 
-schema v4 证据还绑定验收模式和 `latency` Profile。旧证据、配置漂移、容器重建后的身份变化、驱动变化、权限放宽或超过有效期，都会使它失效。
+两种证据都绑定验收模式和 `latency` Profile；schema v5 还绑定 typed rollout、冻结输入和 completed
+transaction receipt。旧证据、配置漂移、容器重建后的身份变化、驱动变化、权限放宽或超过有效期，
+都会使它失效。
 
 当前可执行 Catalog 只保留 legacy/provisional 9B 条目；未经实机验证的估算模型已退出部署
 allowlist。在当前门禁重新完成前，planner 不会给出写入命令。
@@ -541,7 +543,8 @@ python3 -c 'from scripts.runtime_identity import rendered_compose; import json; 
 ./scripts/acceptance-suite.sh quick
 ```
 
-观察 schema v4 证据如何绑定当前配置。这个实验会发送合成推理请求，不应在未知的共享生产 GPU 上直接运行。
+观察 standalone schema v4 证据如何绑定当前配置。这个实验会发送合成推理请求，不应在未知的
+共享生产 GPU 上直接运行；它不会产生需要 typed upgrade receipt 的 schema v5 qualification。
 
 ### 实验 D：维护者静态检查
 
@@ -624,9 +627,11 @@ DiffID；导入只会原子写入与本地 Catalog 身份完全一致的制品�
 主机准入。`calibrate` 只生成候选对比报告，不会在线调整生产参数。
 `storage gc` 默认 dry-run，且只处理过期的 `.part`/`.tmp`。
 
-可复用验证与本机 acceptance 是两层证据。attestation schema v2 只接受 runner 产生的完整、有序
-schema v4 full 记录，并绑定制品、完整容器安全信封、控制面 package 和 manifest 性能策略；dirty
-tree 只能得到草稿。正式证明必须使用 Minisign 或 Cosign 的分离签名。密码学有效与可晋级是两个
+可复用验证与本机 acceptance 是两层证据。attestation schema v2 接受 runner 产生的完整、有序
+standalone schema v4 full 记录，或带 exact completed upgrade receipt 的 schema v5 full 记录，
+并绑定制品、完整容器安全信封、控制面 package 和 manifest 性能策略；dirty tree 只能得到草稿。
+schema v4 promotion 是迁移期 legacy bridge，待 typed candidate qualification 覆盖并验证后移除；
+它不能证明一次 typed rollout 已完成。正式证明必须使用 Minisign 或 Cosign 的分离签名。密码学有效与可晋级是两个
 不同结论，自哈希 JSON 或调用者任意提供的公钥都不能提升 Catalog：
 
 ```bash

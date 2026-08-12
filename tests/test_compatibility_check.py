@@ -80,6 +80,16 @@ class CompatibilityContractTests(unittest.TestCase):
         checks = compatibility.evaluate_contract(self.contract, self.config)
         self.assertTrue(all(item["passed"] for item in checks))
 
+    def test_material_reader_rejects_a_symlinked_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.toml"
+            target.write_text("[providers]\n", encoding="utf-8")
+            link = root / "config.toml"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "safely read"):
+                compatibility.read_material(link, maximum_bytes=1024)
+
     def test_reasoning_or_tool_drift_fails(self) -> None:
         provider = self.config["providers"][self.contract["provider"]]
         provider["reasoning"]["model_enabled"]["qwen3.5-code"] = False
@@ -122,7 +132,13 @@ class CompatibilityContractTests(unittest.TestCase):
             )
             (project / "src" / "routes.rs").write_text("", encoding="utf-8")
 
-            checks = compatibility.evaluate_governance_source(self.contract, project)
+            checks = compatibility.evaluate_governance_source(
+                self.contract,
+                {
+                    "src/governance.rs": (project / "src" / "governance.rs").read_bytes(),
+                    "src/routes.rs": (project / "src" / "routes.rs").read_bytes(),
+                },
+            )
 
         failed = {item["name"] for item in checks if not item["passed"]}
         self.assertIn("routing request header", failed)

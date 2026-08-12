@@ -85,6 +85,19 @@ bundle 和跨团队 reusable attestation 迁出核心控制面；删除前必须
 当前 deploy lifecycle 中的 `quick-smoke` 只验证启动后的最小安全路径，不生成或宣称 host
 qualification；完整 qualification 仍只属于维护窗口中的 `stack qualify` 目标命令。
 
+#### 迁移说明：transaction-bound full 切片（2026-08-13）
+
+目标命令名 `stack qualify` 尚未成为公共接口。为避免在它落地前继续生成与 replacement 脱节的
+证据，过渡期由 `stack upgrade --qualification full` 在同一维护事务中执行 `target-full`：先固定
+schema v2 run manifest 和 schema v5 evidence，再把 exact receipt 写入 action journal，最后才可
+发布 rollback pointer。只有 completed upgrade 可反向消费该 v5 记录；默认 quick 不产生
+qualification。此迁移实现不改变本 ADR 的终态命令面：未来 typed candidate qualification 接管后，
+该能力应收敛到 `stack qualify`，standalone schema v4 promotion bridge 也应经迁移评审后移除。
+过渡门禁不把 authenticated model registry 冒充 physical target identity：它只确认 logical alias
+由受审本地 provider 暴露。source identity v2 还必须用 `/livez build.configSha256` 证明 live build
+加载了受审 config，compatibility 绑定 raw contract/config/governance 摘要，local Tool 请求固定
+`local_strict`。跨仓 live contract 未提供这些证明时，full 在事务或停机前 fail closed。
+
 ### 7. 公共 CLI
 
 迁移终态只承诺以下生命周期入口：

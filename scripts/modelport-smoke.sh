@@ -2,22 +2,29 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${MODELPORT_ENV_FILE:-$ROOT_DIR/profiles/operations.secrets.env}"
+ENV_FILE="$ROOT_DIR/profiles/operations.secrets.env"
 # shellcheck source=scripts/lib/deployment.sh
 source "$ROOT_DIR/scripts/lib/deployment.sh"
 load_deployment_env "$ROOT_DIR"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+if [[ "${LOCAL_INFERENCE_BOUND_QUALIFICATION:-}" == "1" ]]; then
+  ENV_FILE="${MODELPORT_ENV_FILE:?Bound ModelPort credential capability is required}"
+  QWEN_SERVED_MODEL_ID="${LOCAL_INFERENCE_SERVED_MODEL_ID:?}"
+else
+  ENV_FILE="${MODELPORT_ENV_FILE:-$ENV_FILE}"
+fi
+if [[ -f "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+  load_private_modelport_token "$ROOT_DIR" "$ENV_FILE"
 fi
 
 : "${MODELPORT_AUTH_TOKEN:?MODELPORT_AUTH_TOKEN is required}"
-MODELPORT_ENDPOINT="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"
+if [[ "${LOCAL_INFERENCE_BOUND_QUALIFICATION:-}" == "1" ]]; then
+  MODELPORT_ENDPOINT="http://127.0.0.1:38082"
+else
+  MODELPORT_ENDPOINT="${MODELPORT_BASE_URL:-${ANTHROPIC_BASE_URL:-http://127.0.0.1:38082}}"
+fi
 
 curl --noproxy '*' -fsS "$MODELPORT_ENDPOINT/livez"
 printf '\n'

@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.env_utils import is_private_regular_file, load_env_defaults
+    from scripts.env_utils import load_private_env_defaults
     from scripts.local_http import direct_urlopen
 except ModuleNotFoundError:
-    from env_utils import is_private_regular_file, load_env_defaults
+    from env_utils import load_private_env_defaults
     from local_http import direct_urlopen
 
 
@@ -28,9 +28,7 @@ DEFAULT_SECRETS = ROOT_DIR / "profiles" / "operations.secrets.env"
 
 
 def load_env(path: Path) -> None:
-    if path.exists() and not is_private_regular_file(path):
-        raise RuntimeError(f"unsafe private environment file: {path}")
-    load_env_defaults(path)
+    load_private_env_defaults(path, allowed_keys={"MODELPORT_AUTH_TOKEN"})
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,11 +116,21 @@ def assert_response(body: dict[str, Any], assertion: dict[str, Any]) -> tuple[bo
 
 def main() -> int:
     args = parse_args()
-    load_env(DEFAULT_SECRETS)
+    bound = os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION") == "1"
+    secrets_path = (
+        Path(os.environ["MODELPORT_ENV_FILE"])
+        if bound
+        else DEFAULT_SECRETS
+    )
+    load_env(secrets_path)
     token = os.environ.get("MODELPORT_AUTH_TOKEN")
     if not token:
         raise SystemExit("MODELPORT_AUTH_TOKEN is required")
-    base_url = os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
+    base_url = (
+        "http://127.0.0.1:38082"
+        if bound
+        else os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
+    )
     suite = json.loads(args.cases.read_text(encoding="utf-8"))
     cases = suite["cases"]
     if args.smoke:

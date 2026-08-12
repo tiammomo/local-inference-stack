@@ -315,6 +315,38 @@ class HistoryStoreTests(unittest.TestCase):
 
 
 class ToolWorkflowFixtureTests(unittest.TestCase):
+    def test_tool_request_forces_the_reviewed_local_only_route(self) -> None:
+        captured: dict[str, str] = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"content":[],"usage":{}}'
+
+        def open_request(request, timeout):
+            self.assertEqual(timeout, 600)
+            captured.update(
+                {key.lower(): value for key, value in request.header_items()}
+            )
+            return Response()
+
+        with patch.object(tool_workflow, "direct_urlopen", side_effect=open_request):
+            tool_workflow.request_message(
+                "http://127.0.0.1:38082",
+                "private-token",
+                "qwen3.5-code",
+                [],
+                [{"role": "user", "content": "test"}],
+            )
+
+        self.assertEqual(captured["x-modelport-hybrid-mode"], "local_strict")
+
     def test_fixture_expands_to_forty_unique_cases_and_five_smoke_cases(self) -> None:
         suite = json.loads(
             (ROOT / "quality" / "tool-workflows.json").read_text(encoding="utf-8")

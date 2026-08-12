@@ -53,6 +53,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from local_inference_stack.paths import ProjectPaths  # noqa: E402
+from local_inference_stack.materials import (  # noqa: E402
+    MaterialError,
+    read_private_json_file,
+)
 from local_inference_stack.result import RecoveryError  # noqa: E402
 from local_inference_stack.transactions import TransactionStore  # noqa: E402
 from local_inference_stack.catalog import (  # noqa: E402
@@ -79,8 +83,12 @@ from local_inference_stack.configuration import (  # noqa: E402
 )
 from local_inference_stack.host import environment_kind  # noqa: E402
 from local_inference_stack.acceptance import (  # noqa: E402
+    ROLLOUT_EVIDENCE_SCHEMA_VERSION,
+    acceptance_evidence_shape_valid,
+    rollout_binding_valid,
     run_manifest_matches_evidence,
     run_record_valid,
+    sha256_document,
     validation_input,
 )
 
@@ -91,6 +99,9 @@ INTEGRITY_DIR = ROOT_DIR / "cache" / "integrity"
 ACQUISITION_DIR = ROOT_DIR / "cache" / "acquisitions"
 ACCEPTANCE_DIR = ROOT_DIR / "logs" / "acceptance"
 ACCEPTANCE_SCHEMA_VERSION = 4
+ACCEPTANCE_SCHEMA_VERSIONS = frozenset(
+    {ACCEPTANCE_SCHEMA_VERSION, ROLLOUT_EVIDENCE_SCHEMA_VERSION}
+)
 ACCEPTANCE_MAX_AGE = timedelta(days=30)
 ACCEPTANCE_FUTURE_SKEW = timedelta(seconds=300)
 HOST_FINGERPRINT_TYPE = "machine-id-sha256-v1"
@@ -513,7 +524,8 @@ def acceptance_matches_host(
     now: datetime | None = None,
 ) -> bool:
     if (
-        evidence.get("schemaVersion") != ACCEPTANCE_SCHEMA_VERSION
+        not acceptance_evidence_shape_valid(evidence)
+        or evidence.get("schemaVersion") not in ACCEPTANCE_SCHEMA_VERSIONS
         or evidence.get("status") != "passed"
         or evidence.get("exitCode") != 0
         or evidence.get("failedAtStep") is not None
@@ -606,6 +618,11 @@ def acceptance_matches_host(
         return False
     if not acceptance_run_manifest_matches(evidence):
         return False
+    if (
+        evidence.get("schemaVersion") == ROLLOUT_EVIDENCE_SCHEMA_VERSION
+        and not completed_rollout_qualification_matches(evidence)
+    ):
+        return False
     recorded_host = evidence.get("host", {})
     current_fingerprint = host_fingerprint()
     if (
@@ -653,60 +670,27 @@ def acceptance_matches_host(
     )
 
 
-def read_secure_evidence(path: Path) -> dict[str, Any] | None:
-    descriptor: int | None = None
+def read_secure_evidence_with_sha256(
+    path: Path,
+) -> tuple[dict[str, Any], str] | None:
     try:
-        descriptor = os.open(
+        return read_private_json_file(
             path,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            root=ROOT_DIR,
+            maximum_bytes=1024 * 1024,
         )
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_uid != os.getuid()
-            or metadata.st_nlink != 1
-            or metadata.st_size > 1024 * 1024
-        ):
-            return None
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            descriptor = None
-            payload = json.load(handle)
-        return payload if isinstance(payload, dict) else None
-    except (OSError, json.JSONDecodeError):
+    except (MaterialError, OSError, ValueError):
         return None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+
+
+def read_secure_evidence(path: Path) -> dict[str, Any] | None:
+    observed = read_secure_evidence_with_sha256(path)
+    return observed[0] if observed is not None else None
 
 
 def secure_evidence_sha256(path: Path) -> str | None:
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_uid != os.getuid()
-            or metadata.st_nlink != 1
-            or metadata.st_size > 1024 * 1024
-        ):
-            return None
-        digest = hashlib.sha256()
-        with os.fdopen(descriptor, "rb") as handle:
-            descriptor = None
-            for chunk in iter(lambda: handle.read(64 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-    except OSError:
-        return None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+    observed = read_secure_evidence_with_sha256(path)
+    return observed[1] if observed is not None else None
 
 
 def acceptance_run_manifest_matches(evidence: dict[str, Any]) -> bool:
@@ -724,13 +708,73 @@ def acceptance_run_manifest_matches(evidence: dict[str, Any]) -> bool:
     ):
         return False
     path = ROOT_DIR / relative
-    manifest = read_secure_evidence(path)
-    source_sha = secure_evidence_sha256(path)
+    observed = read_secure_evidence_with_sha256(path)
+    manifest, source_sha = observed if observed is not None else (None, None)
     return bool(
         manifest
         and source_sha
         and source_sha == identity.get("sourceSha256")
         and run_manifest_matches_evidence(manifest, run_record, evidence)
+    )
+
+
+def completed_rollout_qualification_matches(evidence: dict[str, Any]) -> bool:
+    """Require schema-v5 evidence to resolve through its completed exact receipt."""
+
+    if evidence.get("schemaVersion") != ROLLOUT_EVIDENCE_SCHEMA_VERSION:
+        return True
+    binding = evidence.get("rolloutBinding")
+    run_record = evidence.get("run")
+    manifest_identity = (
+        run_record.get("manifest") if isinstance(run_record, dict) else None
+    )
+    frozen_inputs = evidence.get("frozenInputs")
+    configuration = evidence.get("configuration")
+    if (
+        not rollout_binding_valid(binding)
+        or not isinstance(manifest_identity, dict)
+        or not isinstance(frozen_inputs, dict)
+        or not isinstance(configuration, dict)
+    ):
+        return False
+    basename = (
+        f"qualification-{binding['transactionId']}-{binding['actionOrdinal']}"
+    )
+    evidence_relative = Path("logs") / "acceptance" / f"{basename}.json"
+    manifest_relative = Path("logs") / "acceptance" / f"{basename}.run.json"
+    evidence_path = ROOT_DIR / evidence_relative
+    if (
+        evidence.get("evidenceId") != basename
+        or manifest_identity.get("sourcePath") != manifest_relative.as_posix()
+        or (observed := read_secure_evidence_with_sha256(evidence_path)) is None
+        or observed[0] != evidence
+    ):
+        return False
+    evidence_sha256 = observed[1]
+    binding_sha256 = sha256_document(binding)
+    try:
+        receipt = TransactionStore(ProjectPaths(ROOT_DIR)).completed_upgrade_qualification(
+            binding["transactionId"],
+            evidence_path=evidence_relative.as_posix(),
+            evidence_self_sha256=evidence["selfSha256"],
+            rollout_binding_sha256=binding_sha256,
+        )
+    except (KeyError, RecoveryError, OSError, ValueError):
+        return False
+    return bool(
+        receipt.get("evidenceSha256") == evidence_sha256
+        and receipt.get("runManifestPath") == manifest_relative.as_posix()
+        and receipt.get("runManifestSha256")
+        == manifest_identity.get("sourceSha256")
+        and receipt.get("runManifestSelfSha256")
+        == manifest_identity.get("selfSha256")
+        and receipt.get("stepResultsSha256")
+        == sha256_document(run_record.get("stepResults"))
+        and receipt.get("configurationSha256")
+        == sha256_document(configuration)
+        and receipt.get("runtimeIdentitySha256")
+        == frozen_inputs.get("liveRuntimeIdentitySha256")
+        and receipt.get("rolloutBindingSha256") == binding_sha256
     )
 
 
@@ -759,13 +803,13 @@ def discover_host_acceptance(
     except OSError:
         return None
     for _, path in sorted(candidates, reverse=True):
-        evidence = read_secure_evidence(path)
+        observed = read_secure_evidence_with_sha256(path)
+        evidence = observed[0] if observed is not None else None
         if not evidence or evidence.get("evidenceId") != path.stem:
             continue
         if acceptance_matches_host(model, host, evidence):
-            evidence_sha256 = secure_evidence_sha256(path)
-            if evidence_sha256 is None:
-                continue
+            assert observed is not None
+            evidence_sha256 = observed[1]
             return {
                 "status": "passed-current-configuration",
                 "evidence": str(path.relative_to(ROOT_DIR)),
@@ -845,7 +889,9 @@ def plan_for_host(
         "catalogDeploymentEligible": catalog_eligible,
         "hardwareProfileMatch": hardware_profile_match,
         "hostAcceptancePolicy": {
-            "schemaVersion": ACCEPTANCE_SCHEMA_VERSION,
+            "supportedSchemaVersions": sorted(ACCEPTANCE_SCHEMA_VERSIONS),
+            "standaloneSchemaVersion": ACCEPTANCE_SCHEMA_VERSION,
+            "transactionBoundSchemaVersion": ROLLOUT_EVIDENCE_SCHEMA_VERSION,
             "maxAgeDays": int(ACCEPTANCE_MAX_AGE.total_seconds() // 86400),
             "futureSkewSeconds": int(ACCEPTANCE_FUTURE_SKEW.total_seconds()),
             "requiresMachineFingerprint": True,
@@ -1112,6 +1158,7 @@ def approved_catalog_action(
     catalog: dict[str, Any],
     *,
     require_artifact: bool = False,
+    expected_rollout_kind: str | None = None,
 ) -> tuple[dict[str, Any], Any | None]:
     """Bind a mutating child action to the active Catalog-spec approval."""
 
@@ -1128,6 +1175,15 @@ def approved_catalog_action(
     if not transaction_id:
         raise SystemExit(
             "--catalog-spec-sha256 requires QWEN_CONTROL_TRANSACTION_ID"
+        )
+    action_kind = os.environ.get("LOCAL_INFERENCE_ROLLOUT_ACTION_KIND")
+    if (
+        action_kind is not None
+        and expected_rollout_kind is not None
+        and action_kind != expected_rollout_kind
+    ):
+        raise SystemExit(
+            "model mutation is not authorized by the pending rollout action kind"
         )
     if require_artifact and artifact_sha256 is None:
         raise SystemExit("transactional download requires --artifact-sha256")
@@ -1598,7 +1654,10 @@ def record_acquisition(
 def download_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     confirmation_required(args, "download")
     model, approved_artifact = approved_catalog_action(
-        args, catalog, require_artifact=True
+        args,
+        catalog,
+        require_artifact=True,
+        expected_rollout_kind="fetch-target-artifact",
     )
     if approved_artifact is not None and args.all_artifacts:
         raise SystemExit(
@@ -1713,7 +1772,9 @@ def deployment_env(model: dict[str, Any]) -> str:
 
 def select_model(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     confirmation_required(args, "select")
-    model, _artifact = approved_catalog_action(args, catalog)
+    model, _artifact = approved_catalog_action(
+        args, catalog, expected_rollout_kind="activate-target"
+    )
     require_catalog_action_admission(args, catalog, model["id"], "select")
     store = TransactionStore(ProjectPaths(ROOT_DIR))
     try:

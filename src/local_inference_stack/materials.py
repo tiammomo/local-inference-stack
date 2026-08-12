@@ -290,6 +290,95 @@ def read_file_bytes(path: Path, *, maximum_bytes: int) -> bytes:
         os.close(descriptor)
 
 
+def read_private_json_file(
+    path: Path,
+    *,
+    root: Path,
+    maximum_bytes: int,
+) -> tuple[dict[str, Any], str]:
+    """Read and hash one private JSON object beneath an exact filesystem root.
+
+    Every path component is opened with ``O_NOFOLLOW`` through
+    :func:`_open_material`.  Parsing and hashing consume the same stable byte
+    string, and a second component-wise open proves that the named path still
+    resolves to the inspected inode after the read.
+    """
+
+    if maximum_bytes < 0:
+        raise ValueError("maximum_bytes cannot be negative")
+    absolute_root = _absolute_path(root)
+    absolute_path = _absolute_path(path if path.is_absolute() else root / path)
+    try:
+        relative = absolute_path.relative_to(absolute_root)
+    except ValueError as error:
+        raise MaterialCoverageError(
+            f"private JSON is outside the trusted root: {path}"
+        ) from error
+    if not relative.parts:
+        raise MaterialCoverageError("the trusted root cannot be a private JSON file")
+
+    descriptor, before = _open_material(absolute_path)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        mode = stat.S_IMODE(before.st_mode)
+        if mode & 0o077 or mode & 0o7000:
+            raise MaterialError(
+                f"private JSON must be owner-only with no special bits: {path}"
+            )
+        if before.st_size > maximum_bytes:
+            raise MaterialError(f"private JSON exceeds the size limit: {path}")
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, maximum_bytes + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum_bytes:
+                raise MaterialError(f"private JSON exceeds the size limit: {path}")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if total != before.st_size or _stat_identity(after) != _stat_identity(before):
+            raise MaterialError(f"private JSON changed while it was read: {path}")
+        current_descriptor, current = _open_material(absolute_path)
+        try:
+            if _stat_identity(current) != _stat_identity(before):
+                raise MaterialError(
+                    f"private JSON path changed while it was read: {path}"
+                )
+        finally:
+            os.close(current_descriptor)
+    except MaterialError:
+        raise
+    except OSError as error:
+        raise MaterialError(f"cannot read private JSON: {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+
+    body = b"".join(chunks)
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        document: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in document:
+                raise ValueError("duplicate JSON key")
+            document[key] = value
+        return document
+
+    try:
+        document = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-standard JSON number: {value}")
+            ),
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise MaterialError(f"private JSON is not strict JSON: {path}") from error
+    if not isinstance(document, dict):
+        raise MaterialError(f"private JSON must contain an object: {path}")
+    return document, hashlib.sha256(body).hexdigest()
+
+
 def _relative_path(path: Path, root: Path) -> str:
     absolute_root = _absolute_path(root)
     absolute_path = _absolute_path(path if path.is_absolute() else root / path)

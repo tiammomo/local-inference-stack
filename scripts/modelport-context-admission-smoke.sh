@@ -2,21 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SECRETS_FILE="${OPERATIONS_SECRETS_FILE:-$ROOT_DIR/profiles/operations.secrets.env}"
-BASE_URL="${MODELPORT_BASE_URL:-http://127.0.0.1:38082}"
+SECRETS_FILE="$ROOT_DIR/profiles/operations.secrets.env"
+BASE_URL="http://127.0.0.1:38082"
 BODY_FILE="$(mktemp)"
 REQUEST_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE" "$REQUEST_FILE"' EXIT
 
-if [[ -f "$SECRETS_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$SECRETS_FILE"
-  set +a
+# shellcheck source=scripts/lib/deployment.sh
+source "$ROOT_DIR/scripts/lib/deployment.sh"
+if [[ "${LOCAL_INFERENCE_BOUND_QUALIFICATION:-}" == "1" ]]; then
+  SECRETS_FILE="${MODELPORT_ENV_FILE:?Bound ModelPort credential capability is required}"
+else
+  SECRETS_FILE="${OPERATIONS_SECRETS_FILE:-$SECRETS_FILE}"
+  BASE_URL="${MODELPORT_BASE_URL:-$BASE_URL}"
+fi
+if [[ -f "$SECRETS_FILE" || -L "$SECRETS_FILE" ]]; then
+  load_private_modelport_token "$ROOT_DIR" "$SECRETS_FILE"
 fi
 : "${MODELPORT_AUTH_TOKEN:?MODELPORT_AUTH_TOKEN is required}"
 
-python3 - "$REQUEST_FILE" <<'PY'
+FAST_MODEL="${LOCAL_INFERENCE_LOGICAL_FAST_MODEL:-qwen3.5-fast}"
+python3 - "$REQUEST_FILE" "$FAST_MODEL" <<'PY'
 import json
 import pathlib
 import sys
@@ -26,7 +32,7 @@ import sys
 # the aggregate context admission guard instead of the earlier output guard.
 prompt = " ".join(f"context_boundary_probe_{index:06d}" for index in range(14_000))
 payload = {
-    "model": "qwen3.5-fast",
+    "model": sys.argv[2],
     "max_tokens": 4096,
     "thinking": {"type": "disabled"},
     "messages": [{"role": "user", "content": prompt}],

@@ -25,7 +25,7 @@ nvm use
 node --version
 ```
 
-### rollout 内部 quick 的边界
+### rollout 内部 quick 与 full 的边界
 
 类型化 upgrade/rollback 在切换前后调用内部 `quick --no-record`。它绑定到当前 transaction 的
 下一 action，只作为“这个精确 runtime 能否继续完成或回退”的服务门禁；`--no-record` 明确禁止
@@ -35,8 +35,40 @@ node --version
 - 不会把 `evidenceStatus` 改成 `validated-on-this-host`；
 - 不能签署 reusable attestation、晋级 Catalog 或改写 deployment manifest 的历史验证结论。
 
-需要新 qualification 时仍须独立运行受评审的 `full`。把 full runner 的逐步记录和结论完整绑定到
-同一个 rollout transaction 仍是 Phase B 完成条件，不能用 quick 输出摘要替代。
+upgrade 默认的 `--qualification quick` 保持上述语义。需要在 replacement 上产生新 qualification
+时，使用公共入口的 v2 rollout；不要直接拼装内部环境变量或调用 runner：
+
+```bash
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full --yes
+```
+
+`full` 会在 target quick 之后加入独立 `target-full` action。它先绑定一个确定性 schema v2 run
+manifest，再生成 schema v5 evidence；文件名固定为
+`qualification-<transaction-uuid>-<action-ordinal>{.run.json,.json}`。两份文件共同绑定 rollout plan、
+source/target Catalog spec、rollback spec、action、acceptance configuration、controller materials、
+精确容器 ID/启动时间/image ID/config hash，以及 ModelPort 的 clean Git commit/tree、关键材料哈希
+和匹配的 loopback live build。每个 step 与 finalize 都重新检查冻结输入，runner 子进程不继承
+rollout mutation authority。
+
+ModelPort source identity v2 还要求 `/livez` 的 `build.configSha256` 精确等于安全读取的受审
+`config.toml`。compatibility 结果必须绑定它实际读取的 raw provider contract、config 和 governance
+源码摘要；不能把两次不同路径读取的结论拼成一个输入。鉴权 `/v1/models` registry 只证明受审
+logical aliases 当前由 `local_qwen` provider 暴露，不自称能证明背后的 physical target；物理目标
+由事务绑定的 target runtime 和后续 gates 证明。local Tool 请求固定使用 `local_strict`，不得在
+qualification 中静默回退到云 provider。
+
+passed 文件本身仍不是权威结论。控制面会在同一 runtime boundary 内安全重读两份私有文件、
+校验逐步结果与所有哈希，并把 receipt 以 CAS 写入当前 `target-full` action；只有随后完整结束的
+upgrade transaction 才能反向解析该 schema v5 qualification。写出 evidence 后崩溃、事务失败或
+恢复、文件替换、错误 transaction/action/spec，以及没有 completed receipt 的复制件全部失效。
+receipt 完成前不会发布 rollback pointer。
+
+当前运行中的 ModelPort 尚未提供所需的 `/livez build.configSha256`，因此本机
+`--qualification full` 会在事务创建和 source 停机前 fail closed。必须先在独立、受评审的跨仓
+升级中补齐该非秘密 live identity，再执行真实 drill；不能放宽 v2 reader 或手工补字段。
 
 ### standard/full 联合前置条件
 
@@ -70,8 +102,9 @@ provision，不能把密码或 token 粘贴进命令、日志或文档。
 
 ## 本机凭证
 
-验收日志和 JSON 写入 Git 忽略的 `logs/acceptance/`。只有通过的 schema v4 凭证才
-可能产生 `validated-on-this-host`；它还必须满足：
+验收日志和 JSON 写入 Git 忽略的 `logs/acceptance/`。独立验收继续写 schema v4；事务绑定 full
+写 schema v5。两者都只有在通过当前读取策略时才可能产生 `validated-on-this-host`，其中 v5
+还必须反向匹配 exact completed upgrade receipt。共同条件包括：
 
 - 当前用户所有、普通文件、单硬链接、权限 `0600`；
 - 未超过 30 天，时间和正文自校验正确；
@@ -101,7 +134,8 @@ quick 通过后重新运行：
 
 - `evidenceStatus=validated-on-this-host`；
 - `hostAcceptanceStatus=passed-current-configuration`；
-- `hostAcceptanceEvidence` 指向当前安全的 schema v4 文件。
+- `hostAcceptanceEvidence` 指向当前安全的 schema v4 文件，或带 completed transaction receipt 的
+  schema v5 文件。
 
 这不保证 `readyToDeploy=true`。健康容器已占用 GPU 时，空闲显存会使
 `readyToDeploy=false` 且 `actionPlan=null`，目的是阻止第二次部署。现有服务是否已恢复
@@ -112,9 +146,14 @@ quick 通过后重新运行：
 
 ## Catalog 晋级与性能证据
 
-本机 acceptance 与可复用 Catalog attestation 是两层证据。`validated` 晋级只接受当前、完整的
-schema v4 `full` evidence，并要求 clean Git revision、当前制品/runtime/配置匹配、受信任的分离
+本机 acceptance 与可复用 Catalog attestation 是两层证据。新的 transaction-bound qualification
+使用当前、完整的 schema v5 `full` evidence，并要求 exact completed receipt、clean Git revision、
+当前制品/runtime/配置匹配、受信任的分离
 签名、有效期、撤销状态和 supersede 链。自哈希、README 或 manifest 不能单独完成晋级。
+schema v4 继续用于 standalone 本机证据兼容；它不能冒充缺失的 rollout binding 或 v5 receipt。
+当前晋级策略仍把满足全部既有条件的 standalone schema v4 `full` 保留为临时 legacy bridge，
+因此并非所有可复用资格都已经强制迁到 v5。待 typed candidate qualification 覆盖旧流程并完成
+实机验证后，才能另行评审、迁移消费者并删除这条 bridge。
 稳定 validation input 还绑定全部控制面 package、公共 launcher、类型化配置 schema 和性能策略；
 任何安全/晋级逻辑或硬阈值变化都会使旧签名失去晋级资格。Catalog 运行时只接受由
 `LOCAL_INFERENCE_TRUSTED_ATTESTATION_KEY` 与

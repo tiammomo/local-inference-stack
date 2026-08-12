@@ -15,22 +15,26 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.env_utils import is_private_regular_file, load_env_defaults
+    from scripts.env_utils import load_private_env_defaults
     from scripts.local_http import direct_urlopen
 except ModuleNotFoundError:
-    from env_utils import is_private_regular_file, load_env_defaults
+    from env_utils import load_private_env_defaults
     from local_http import direct_urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT_DIR / "quality" / "tool-workflows.json"
 DEFAULT_SECRETS = ROOT_DIR / "profiles" / "operations.secrets.env"
+BOUND_QUALIFICATION = os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION") == "1"
+REQUEST_MAX_TOKENS = (
+    int(os.environ["LOCAL_INFERENCE_TOOL_USE_MAX_TOKENS"])
+    if BOUND_QUALIFICATION
+    else 1024
+)
 
 
 def load_env(path: Path) -> None:
-    if path.exists() and not is_private_regular_file(path):
-        raise RuntimeError(f"unsafe private environment file: {path}")
-    load_env_defaults(path)
+    load_private_env_defaults(path, allowed_keys={"MODELPORT_AUTH_TOKEN"})
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,7 +89,7 @@ def request_message(
 ) -> tuple[dict[str, Any], float]:
     payload = {
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": REQUEST_MAX_TOKENS,
         "temperature": 0,
         "thinking": {"type": "enabled", "budget_tokens": 256},
         "tools": tools,
@@ -102,6 +106,7 @@ def request_message(
             "x-api-key": token,
             "anthropic-version": "2023-06-01",
             "x-modelport-traffic-class": "synthetic",
+            "x-modelport-hybrid-mode": "local_strict",
         },
         method="POST",
     )
@@ -310,12 +315,26 @@ def evaluate_case(
 
 def main() -> int:
     args = parse_args()
-    load_env(DEFAULT_SECRETS)
+    bound = BOUND_QUALIFICATION
+    secrets_path = (
+        Path(os.environ["MODELPORT_ENV_FILE"])
+        if bound
+        else DEFAULT_SECRETS
+    )
+    load_env(secrets_path)
     token = os.environ.get("MODELPORT_AUTH_TOKEN")
     if not token:
         raise SystemExit("MODELPORT_AUTH_TOKEN is required")
-    base_url = os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
-    model = os.environ.get("TOOL_WORKFLOW_MODEL", "qwen3.5-code")
+    base_url = (
+        "http://127.0.0.1:38082"
+        if bound
+        else os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
+    )
+    model = (
+        os.environ["LOCAL_INFERENCE_LOGICAL_CODE_MODEL"]
+        if bound
+        else os.environ.get("TOOL_WORKFLOW_MODEL", "qwen3.5-code")
+    )
     cases_path = args.cases.resolve()
     suite = json.loads(cases_path.read_text(encoding="utf-8"))
     cases = expand_cases(suite)

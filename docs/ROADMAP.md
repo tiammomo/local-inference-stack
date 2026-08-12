@@ -5,9 +5,10 @@
 ADR-0002 为准。它描述依赖顺序和完成定义，不是承诺日期；任何阶段都必须保持现有安全黄金
 路径可用。
 
-截至 2026-08-12，控制面完成了一轮 fail-closed 加固，但当前 Catalog 的唯一 9B 条目仍是
+截至 2026-08-13，控制面完成了一轮 fail-closed 加固，但当前 Catalog 的唯一 9B 条目仍是
 `provisional`：在线健康实例不等于新部署或 replacement 资格。package-native 权威边界、无消费者
-wrapper 清理、Tier-1 owner migration 和类型化 upgrade/rollback 基础已经落地。维护后 quick
+wrapper 清理、Tier-1 owner migration、类型化 upgrade/rollback 基础和 transaction-bound full
+qualification 代码切片已经落地。维护后 quick
 recheck 已通过，但它不是 full host qualification；Catalog 没有晋级，历史验证结论也未重写。
 
 ## ADR-0002 收口阶段
@@ -15,7 +16,7 @@ recheck 已通过，但它不是 full host qualification；Catalog 没有晋级�
 | 阶段 | 当前状态 | 完成定义 |
 | --- | --- | --- |
 | A 旁路重构 | 进行中 | Catalog、material、observation 和 lifecycle 逻辑进入 package；当前 runtime 不变 |
-| B 维护窗口切换 | typed rollout 基础已完成，实机收口进行中 | systemd 是唯一自动恢复 owner；仍须把 full qualification 完整绑定到 rollout transaction，并完成真实 upgrade/rollback、reboot 与 host qualification |
+| B 维护窗口切换 | full 事务绑定代码已完成，实机收口进行中 | systemd 是唯一自动恢复 owner；仍须完成真实 upgrade/rollback、reboot 与 host qualification |
 | C 验证后删除 | 未开始 | LTS/回滚/重启验证通过后，删除旧 schema、candidate、operations、bundle 与 attestation 核心路径 |
 
 ### Phase B owner migration 与 typed rollout 基础
@@ -34,6 +35,12 @@ recheck 已通过，但它不是 full host qualification；Catalog 没有晋级�
 - rollback 只接受同一主机、同一 controller、当前 Catalog 仍认可的 `latency` 锚点和本地
   artifact/image，不联网、不 pull、不 checkout Git；
 - rollout 的 source/target quick 固定使用 `--no-record`，只作服务门禁，不生成 qualification。
+- 显式 `upgrade --qualification full` 使用 rollout plan/intent v2，在 rollback pointer 发布前执行
+  `target-full`；schema v2 run manifest、schema v5 evidence、冻结输入与 action receipt 由同一
+  transaction 绑定，只有 exact completed upgrade 可反向消费。
+- source identity v2 要求 live ModelPort 证明受审 config 摘要，compatibility 绑定 raw
+  contract/config/governance，Tool gate 固定 `local_strict`；当前 live build 尚未暴露所需
+  `configSha256`，所以真实 full 在跨仓升级前会于事务/停机前 fail closed。
 
 existing-selection 恢复时，当前 free VRAM/RAM 会受到已选模型、runtime 和缓存占用影响，因而只作
 advisory；它不能授权新部署，也不能绕过制品和配置身份。恢复后的健康、canonical Profile 与实际
@@ -43,7 +50,6 @@ advisory；它不能授权新部署，也不能绕过制品和配置身份。恢
 一个 provisional LTS 条目，没有合法 validated rollback/LTS 模型对；真实命令因而按设计 fail
 closed。下列工作仍是 Phase B 的完成条件：
 
-- 把 `full` qualification 的 runner 记录、逐步结果和最终结论完整绑定到同一 rollout transaction；
 - 在合法 validated rollback/LTS 模型对上完成一次 Tier-1 真实 upgrade→rollback drill，验证一次性
   pointer、失败注入与恢复结果；
 - 完成一次真实 WSL shutdown/reboot、Docker 延迟就绪、systemd 自动恢复和活动事务重入验证；
@@ -59,8 +65,8 @@ closed。下列工作仍是 Phase B 的完成条件：
 | 0 基线与决策 | 首版完成 | ADR、行为边界、支持矩阵和 characterization tests 已落地 |
 | 1 统一 CLI | 首版完成 | `./stack`、结构化结果、退出码和兼容适配已落地 |
 | 2 类型化配置 | 加固完成，待实机复核 | Catalog 决定模型容量，Profile 只覆盖运行模式；schema v2 与矩阵测试已落地 |
-| 3 持久事务 | typed rollout 基础已实现，full 绑定待收口 | recovery-required、事务 ID CAS、双锁、信号恢复、rollout intent/action journal、rollback spec/pointer 和 supervisor maintenance wait 已落地；full qualification 仍待统一纳入 |
-| 4 证据晋级 | 门禁实现，尚无可晋级证据 | schema v4 绑定当前制品/完整安全信封；full、性能、受信签名和生命周期必须同时通过 |
+| 3 持久事务 | full 绑定代码已实现，实机待验证 | recovery-required、事务 ID CAS、双锁、rollout intent/action journal、rollback spec/pointer、supervisor maintenance wait 和 full receipt 已落地 |
+| 4 证据晋级 | v5 事务门禁实现，尚无可晋级证据 | schema v4 暂留 standalone/promotion legacy bridge；新 rollout qualification 的 v5 绑定 completed receipt，性能、受信签名和生命周期仍须同时通过 |
 | 5 最小权限运维 | 部分完成，跨仓库阻塞 | aggregate-only 快照和零凭据 Dashboard 已完成；专用 scope 待 ModelPort |
 | 6 供应链与 bundle | 首版完成，持续强化 | 固定身份、来源审计和离线 bundle 已落地；签名覆盖继续扩展 |
 | 7 校准/存储/凭据 | 部分完成 | baseline-only 校准、安全 GC、凭据审计/迁移已落地；性能阈值仍为 pending-baseline |
@@ -287,10 +293,10 @@ upgrade/rollback 还在 transaction v2 中固定 source/target Catalog spec、ro
 当前后续优先级不是重新实现该切片，而是：
 
 1. 在明确批准的维护窗口完成至少三轮 `baseline-only` 校准，评审后写入硬阈值；
-2. 在干净提交上运行 schema v4 `full`，复核逐步结果、制品和完整容器安全信封，再用固定的
-   受信公钥策略签名；
-3. 将 `full` qualification runner 的完整记录与结论绑定到 typed rollout transaction；现有
-   `quick --no-record` 只保留为服务门禁，不能冒充 qualification；
+2. 在合法模型对和干净提交上运行 transaction-bound schema v5 `full`，复核逐步结果、制品、
+   完整容器安全信封与 completed receipt，再用固定的受信公钥策略签名；
+3. 在安全门已实现的前提下，用合法模型对完成一次真实 transaction-bound full upgrade，复核
+   v5 evidence、run manifest、receipt 与 rollback pointer 的顺序；
 4. 与 ModelPort 约定 provider self-attestation/health contract，并把 operations、数据库、
    Dashboard、备份和管理员凭据代码迁出核心；
 5. 解除 Catalog admission 对 reusable attestation/offline bundle 的依赖，再把两者迁为可选

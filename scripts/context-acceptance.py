@@ -14,12 +14,23 @@ except ModuleNotFoundError:
     from local_http import direct_urlopen
 
 
+BOUND_QUALIFICATION = os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION") == "1"
 CONTEXT_BACKEND = os.environ.get("CONTEXT_BACKEND", "llama")
 LLAMA_BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://127.0.0.1:18080")
 MODELPORT_BASE_URL = os.environ.get("MODELPORT_BASE_URL", "http://127.0.0.1:38082")
-TARGET_TOKENS = int(os.environ.get("TARGET_TOKENS", "118000"))
-DEFAULT_MAX_TOKENS = "8192" if CONTEXT_BACKEND == "modelport" else "512"
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", DEFAULT_MAX_TOKENS))
+if BOUND_QUALIFICATION:
+    SERVED_MODEL_ID = os.environ["LOCAL_INFERENCE_SERVED_MODEL_ID"]
+    if CONTEXT_BACKEND == "modelport":
+        TARGET_TOKENS = int(os.environ["LOCAL_INFERENCE_MODELPORT_CONTEXT_TOKENS"])
+        MAX_TOKENS = int(os.environ["LOCAL_INFERENCE_MODELPORT_CONTEXT_MAX_TOKENS"])
+    else:
+        TARGET_TOKENS = int(os.environ["LOCAL_INFERENCE_DIRECT_CONTEXT_TOKENS"])
+        MAX_TOKENS = 512
+else:
+    SERVED_MODEL_ID = os.environ.get("QWEN_SERVED_MODEL_ID", "qwen3.5-9b-q5km")
+    TARGET_TOKENS = int(os.environ.get("TARGET_TOKENS", "118000"))
+    DEFAULT_MAX_TOKENS = "8192" if CONTEXT_BACKEND == "modelport" else "512"
+    MAX_TOKENS = int(os.environ.get("MAX_TOKENS", DEFAULT_MAX_TOKENS))
 ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "false").lower() in {
     "1",
     "true",
@@ -59,7 +70,7 @@ def complete(prompt: str) -> tuple[str, dict]:
             LLAMA_BASE_URL,
             "/v1/chat/completions",
             {
-                "model": "qwen3.5-9b-q5km",
+                "model": SERVED_MODEL_ID,
                 "messages": [message],
                 "max_tokens": MAX_TOKENS,
                 "temperature": 0,
@@ -77,7 +88,7 @@ def complete(prompt: str) -> tuple[str, dict]:
             MODELPORT_BASE_URL,
             "/v1/messages",
             {
-                "model": "local_qwen:qwen3.5-9b-q5km",
+                "model": f"local_qwen:{SERVED_MODEL_ID}",
                 "messages": [message],
                 "max_tokens": MAX_TOKENS,
                 "temperature": 0,

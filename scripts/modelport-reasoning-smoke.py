@@ -18,6 +18,17 @@ BASE_URL = os.environ.get(
     os.environ.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:38082"),
 )
 AUTH_TOKEN = os.environ.get("MODELPORT_AUTH_TOKEN")
+BOUND_QUALIFICATION = os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION") == "1"
+CODE_MODEL = (
+    os.environ["LOCAL_INFERENCE_LOGICAL_CODE_MODEL"]
+    if BOUND_QUALIFICATION
+    else "qwen3.5-code"
+)
+FAST_MODEL = (
+    os.environ["LOCAL_INFERENCE_LOGICAL_FAST_MODEL"]
+    if BOUND_QUALIFICATION
+    else "qwen3.5-fast"
+)
 
 
 def complete(model: str, thinking: dict, max_tokens: int) -> tuple[str, dict]:
@@ -60,10 +71,10 @@ def complete(model: str, thinking: dict, max_tokens: int) -> tuple[str, dict]:
 
 def main() -> None:
     enabled_text, enabled_usage = complete(
-        "qwen3.5-code", {"type": "enabled", "budget_tokens": 128}, 512
+        CODE_MODEL, {"type": "enabled", "budget_tokens": 128}, 512
     )
     disabled_text, disabled_usage = complete(
-        "qwen3.5-fast", {"type": "disabled"}, 128
+        FAST_MODEL, {"type": "disabled"}, 128
     )
     if enabled_text != "42" or disabled_text != "42":
         raise SystemExit(

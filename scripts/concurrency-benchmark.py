@@ -25,7 +25,7 @@ from local_inference_stack.performance import (  # noqa: E402
     PerformancePolicyError,
     default_evidence_path,
     evaluate,
-    load_policy,
+    load_execution_policy,
     write_private_json,
 )
 
@@ -36,9 +36,15 @@ except ModuleNotFoundError:
 
 
 BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://127.0.0.1:18080")
-CONCURRENCY = int(os.environ.get("BENCHMARK_CONCURRENCY", "2"))
-MAX_TOKENS = int(os.environ.get("BENCHMARK_TOKENS", "512"))
-MODEL_ID = os.environ.get("QWEN_SERVED_MODEL_ID", "qwen3.5-9b-q5km")
+BOUND_QUALIFICATION = os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION") == "1"
+if BOUND_QUALIFICATION:
+    CONCURRENCY = int(os.environ["LOCAL_INFERENCE_CONCURRENCY"])
+    MAX_TOKENS = int(os.environ["LOCAL_INFERENCE_CONCURRENCY_TOKENS"])
+    MODEL_ID = os.environ["LOCAL_INFERENCE_SERVED_MODEL_ID"]
+else:
+    CONCURRENCY = int(os.environ.get("BENCHMARK_CONCURRENCY", "2"))
+    MAX_TOKENS = int(os.environ.get("BENCHMARK_TOKENS", "512"))
+    MODEL_ID = os.environ.get("QWEN_SERVED_MODEL_ID", "qwen3.5-9b-q5km")
 
 
 def complete(index: int) -> tuple[int, float | None]:
@@ -88,7 +94,21 @@ def complete(index: int) -> tuple[int, float | None]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path(
+            os.environ.get(
+                "LOCAL_INFERENCE_PERFORMANCE_MANIFEST",
+                os.fspath(DEFAULT_MANIFEST),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--expected-policy-sha256",
+        default=os.environ.get("LOCAL_INFERENCE_PERFORMANCE_POLICY_SHA256"),
+        help="require the Catalog-mapped reviewed policy with this canonical digest",
+    )
     parser.add_argument(
         "--baseline-only",
         action="store_true",
@@ -135,7 +155,15 @@ def _emit(document: dict[str, Any], *, as_json: bool) -> None:
 
 def _policy_preflight(args: argparse.Namespace) -> tuple[Any | None, int | None]:
     try:
-        policy = load_policy(args.manifest)
+        policy = load_execution_policy(
+            root=ROOT_DIR,
+            manifest_path=args.manifest,
+            expected_policy_sha256=args.expected_policy_sha256,
+            catalog_id=os.environ.get("QWEN_CATALOG_ID"),
+            require_binding=(
+                os.environ.get("LOCAL_INFERENCE_BOUND_QUALIFICATION") == "1"
+            ),
+        )
     except PerformancePolicyError as exc:
         _emit(
             {

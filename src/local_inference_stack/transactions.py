@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator
 from .deployment import (
     CatalogDeploymentSpec,
     DeploymentSpecError,
+    RolloutQualification,
     parse_approved_deployment,
 )
 from .materials import (
@@ -113,6 +114,9 @@ CATALOG_BOUND_OPERATIONS = frozenset({"deploy", *ROLLOUT_OPERATIONS})
 ROLLOUT_INTENT_POLICY_ID = (
     "local-inference-stack/transaction-rollout-intent-v1"
 )
+ROLLOUT_INTENT_POLICY_ID_V2 = (
+    "local-inference-stack/transaction-rollout-intent-v2"
+)
 ROLLOUT_INTENT_KEYS = frozenset(
     {
         "policyId",
@@ -136,6 +140,7 @@ ROLLOUT_PLAN_KEYS = frozenset(
         "actions",
     }
 )
+ROLLOUT_PLAN_V2_KEYS = ROLLOUT_PLAN_KEYS | {"qualification"}
 ROLLOUT_ACTION_KEYS = frozenset(
     {"ordinal", "kind", "subject", "catalogId"}
 )
@@ -149,6 +154,30 @@ ROLLOUT_ACTION_RESULT_KEYS = frozenset(
         "completedAt",
     }
 )
+QUALIFICATION_RECEIPT_POLICY_ID = (
+    "local-inference-stack/rollout-qualification-receipt-v1"
+)
+QUALIFICATION_RESULT_POLICY_ID = (
+    "local-inference-stack/rollout-qualification-result-v1"
+)
+ROLLOUT_QUALIFICATION_BINDING_POLICY_ID = (
+    "local-inference-stack/rollout-qualification-binding-v1"
+)
+QUALIFICATION_EVIDENCE_RECEIPT_KEYS = frozenset(
+    {
+        "policyId",
+        "evidencePath",
+        "evidenceSha256",
+        "evidenceSelfSha256",
+        "runManifestPath",
+        "runManifestSha256",
+        "runManifestSelfSha256",
+        "stepResultsSha256",
+        "configurationSha256",
+        "runtimeIdentitySha256",
+        "rolloutBindingSha256",
+    }
+)
 ROLLOUT_ACTION_SUBJECTS = {
     "source-quick": "source",
     "fetch-target-artifact": "target",
@@ -156,6 +185,7 @@ ROLLOUT_ACTION_SUBJECTS = {
     "activate-target": "target",
     "start-target": "target",
     "target-quick": "target",
+    "target-full": "target",
     "publish-rollback": "source",
     "clear-rollback": "target",
 }
@@ -248,6 +278,117 @@ def _canonical_clone(value: Any, *, label: str) -> Any:
         raise RecoveryError(f"{label} is not canonical JSON data") from error
 
 
+def _qualification_material_path(value: Any, *, manifest: bool) -> str:
+    label = (
+        "qualification run manifest path"
+        if manifest
+        else "qualification evidence path"
+    )
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or not value.isascii()
+        or any(
+            character
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/"
+            for character in value
+        )
+    ):
+        raise RecoveryError(f"{label} is invalid")
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or value != path.as_posix()
+        or path.parts[:2] != ("logs", "acceptance")
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or not value.endswith(".json")
+        or value.endswith(".run.json") is not manifest
+    ):
+        raise RecoveryError(f"{label} is invalid")
+    return value
+
+
+def validate_qualification_evidence_receipt(value: Any) -> dict[str, Any]:
+    """Return a strict canonical clone of one full-qualification receipt."""
+
+    receipt = _canonical_clone(value, label="qualification evidence receipt")
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != QUALIFICATION_EVIDENCE_RECEIPT_KEYS
+        or receipt.get("policyId") != QUALIFICATION_RECEIPT_POLICY_ID
+    ):
+        raise RecoveryError(
+            "qualification evidence receipt has an invalid shape or policy"
+        )
+    receipt["evidencePath"] = _qualification_material_path(
+        receipt.get("evidencePath"), manifest=False
+    )
+    receipt["runManifestPath"] = _qualification_material_path(
+        receipt.get("runManifestPath"), manifest=True
+    )
+    for key in QUALIFICATION_EVIDENCE_RECEIPT_KEYS - {
+        "policyId",
+        "evidencePath",
+        "runManifestPath",
+    }:
+        if not _is_sha256(receipt.get(key)):
+            raise RecoveryError(f"qualification evidence receipt {key} is invalid")
+    return receipt
+
+
+def _qualification_result_sha256(
+    action: dict[str, Any], receipt: dict[str, Any]
+) -> str:
+    return canonical_sha256(
+        {
+            "policyId": QUALIFICATION_RESULT_POLICY_ID,
+            "action": {
+                "ordinal": action["ordinal"],
+                "kind": action["kind"],
+                "subject": action["subject"],
+                "catalogId": action["catalogId"],
+            },
+            "qualificationEvidence": receipt,
+        }
+    )
+
+
+def _validated_rollout_qualification(value: Any) -> RolloutQualification:
+    try:
+        return RolloutQualification.from_document(value)
+    except DeploymentSpecError as error:
+        raise RecoveryError(
+            "rollout plan v2 requires its exact full qualification contract"
+        ) from error
+
+
+def _qualification_binding(
+    document: dict[str, Any],
+    intent: dict[str, Any],
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    qualification = _validated_rollout_qualification(
+        intent["rolloutPlan"].get("qualification")
+    )
+    return {
+        "policyId": ROLLOUT_QUALIFICATION_BINDING_POLICY_ID,
+        "transactionId": document["id"],
+        "operation": "upgrade",
+        "rolloutPlanSha256": intent["rolloutPlanSha256"],
+        "actionOrdinal": action["ordinal"],
+        "actionKind": "target-full",
+        "rollbackSpecSha256": intent["rollbackSpecSha256"],
+        "sourceCatalogSpecSha256": intent["sourceCatalogSpecSha256"],
+        "targetCatalogSpecSha256": intent["targetCatalogSpecSha256"],
+        "performancePolicySha256": qualification.performance_policy_sha256,
+        "modelPortSourceIdentitySha256": (
+            qualification.modelport_source_identity_sha256
+        ),
+        "qualificationInputSha256": qualification.qualification_input_sha256,
+    }
+
+
 def _validate_rollout_plan(
     value: Any,
     *,
@@ -259,24 +400,43 @@ def _validate_rollout_plan(
     approved_spec: CatalogDeploymentSpec,
 ) -> dict[str, Any]:
     plan = _canonical_clone(value, label="rollout plan")
-    if not isinstance(plan, dict) or set(plan) != ROLLOUT_PLAN_KEYS:
+    if not isinstance(plan, dict):
+        raise RecoveryError("rollout plan has an invalid shape")
+    plan_schema_version = plan.get("schemaVersion")
+    if not isinstance(plan_schema_version, int) or isinstance(
+        plan_schema_version, bool
+    ):
+        raise RecoveryError("rollout plan has an invalid schema")
+    expected_plan_keys = (
+        ROLLOUT_PLAN_KEYS
+        if plan_schema_version == 1
+        else ROLLOUT_PLAN_V2_KEYS
+        if plan_schema_version == 2
+        else frozenset()
+    )
+    if not expected_plan_keys or set(plan) != expected_plan_keys:
         raise RecoveryError("rollout plan has an invalid shape")
     if (
-        not isinstance(plan.get("schemaVersion"), int)
-        or isinstance(plan.get("schemaVersion"), bool)
-        or plan.get("schemaVersion") != 1
-        or plan.get("operation") != operation
+        plan.get("operation") != operation
         or plan.get("rollbackSpecSha256") != rollback_spec_sha256
         or plan.get("sourceCatalogSpecSha256")
         != source_catalog_spec_sha256
         or plan.get("targetCatalogSpecSha256")
         != target_catalog_spec_sha256
-        # Rollout-plan v1 has a typed quick action but no full-qualification
-        # action.  Refuse to persist a stronger label than the actions prove.
-        or plan.get("requiredAcceptanceTier") != "quick"
         or plan.get("requiresApproval") is not True
     ):
         raise RecoveryError("rollout plan does not match its persisted intent")
+    if plan_schema_version == 1:
+        if plan.get("requiredAcceptanceTier") != "quick":
+            raise RecoveryError(
+                "rollout plan v1 can prove only quick acceptance"
+            )
+    else:
+        if operation != "upgrade" or plan.get("requiredAcceptanceTier") != "full":
+            raise RecoveryError(
+                "rollout plan v2 requires its exact full qualification contract"
+            )
+        _validated_rollout_qualification(plan.get("qualification"))
     if (
         target != approved_spec.catalog_id
         or target_catalog_spec_sha256 != approved_spec.sha256
@@ -346,6 +506,7 @@ def _validate_rollout_plan(
                 "activate-target",
                 "start-target",
                 "target-quick",
+                *(["target-full"] if plan_schema_version == 2 else []),
                 "publish-rollback",
             ]
         )
@@ -384,8 +545,7 @@ def _validate_rollout_intent(
     source_catalog_spec_sha256 = intent.get("sourceCatalogSpecSha256")
     target_catalog_spec_sha256 = intent.get("targetCatalogSpecSha256")
     if (
-        intent.get("policyId") != ROLLOUT_INTENT_POLICY_ID
-        or not _is_sha256(rollback_spec_sha256)
+        not _is_sha256(rollback_spec_sha256)
         or not _is_sha256(source_catalog_spec_sha256)
         or not _is_sha256(target_catalog_spec_sha256)
         or not _is_sha256(intent.get("rolloutPlanSha256"))
@@ -400,6 +560,15 @@ def _validate_rollout_intent(
         target_catalog_spec_sha256=target_catalog_spec_sha256,
         approved_spec=approved_spec,
     )
+    expected_policy_id = (
+        ROLLOUT_INTENT_POLICY_ID
+        if plan["schemaVersion"] == 1
+        else ROLLOUT_INTENT_POLICY_ID_V2
+    )
+    if intent.get("policyId") != expected_policy_id:
+        raise RecoveryError(
+            "rollout intent policy does not match its plan schema"
+        )
     if canonical_sha256(plan) != intent["rolloutPlanSha256"]:
         raise RecoveryError("rollout plan digest does not match its document")
 
@@ -470,9 +639,13 @@ def _validate_rollout_progress(
         raise RecoveryError("rollout action progress is invalid")
     for expected_ordinal, result in enumerate(results):
         action = actions[expected_ordinal]
+        qualification_action = action["kind"] == "target-full"
+        expected_result_keys = ROLLOUT_ACTION_RESULT_KEYS | (
+            {"qualificationEvidence"} if qualification_action else set()
+        )
         if (
             not isinstance(result, dict)
-            or set(result) != ROLLOUT_ACTION_RESULT_KEYS
+            or set(result) != expected_result_keys
             or not isinstance(result.get("ordinal"), int)
             or isinstance(result.get("ordinal"), bool)
             or result.get("ordinal") != expected_ordinal
@@ -484,6 +657,22 @@ def _validate_rollout_progress(
             or not result["completedAt"]
         ):
             raise RecoveryError("rollout action result journal is invalid")
+        if qualification_action:
+            receipt = validate_qualification_evidence_receipt(
+                result.get("qualificationEvidence")
+            )
+            if result["resultSha256"] != _qualification_result_sha256(
+                action, receipt
+            ):
+                raise RecoveryError(
+                    "rollout qualification result does not match its evidence receipt"
+                )
+            if receipt["rolloutBindingSha256"] != canonical_sha256(
+                _qualification_binding(document, intent, action)
+            ):
+                raise RecoveryError(
+                    "rollout qualification receipt does not match its transaction binding"
+                )
     if (
         document.get("state") in {"completed", "superseded-verified"}
         and ordinal != len(actions)
@@ -491,6 +680,67 @@ def _validate_rollout_progress(
         raise RecoveryError(
             "rollout transaction became successful-terminal before all actions completed"
         )
+
+
+def verify_completed_upgrade_qualification(
+    document: Any,
+    *,
+    evidence_path: str,
+    evidence_self_sha256: str,
+    rollout_binding_sha256: str,
+) -> dict[str, Any]:
+    """Return the exact receipt only for a completed transaction-bound full run."""
+
+    TransactionStore._validate(document)
+    if (
+        not isinstance(document, dict)
+        or document.get("schemaVersion") != SCHEMA_VERSION
+        or document.get("operation") != "upgrade"
+        or document.get("state") != "completed"
+    ):
+        raise RecoveryError(
+            "qualification evidence requires a completed v2 upgrade transaction"
+        )
+    approved_spec = _approved_deployment(document)
+    intent = _rollout_intent(document, approved_spec)
+    if intent is None:
+        raise RecoveryError("completed upgrade has no rollout intent")
+    _validate_rollout_progress(document, intent)
+    plan = intent["rolloutPlan"]
+    if (
+        plan.get("schemaVersion") != 2
+        or plan.get("requiredAcceptanceTier") != "full"
+    ):
+        raise RecoveryError(
+            "completed upgrade has no exact full qualification contract"
+        )
+    _validated_rollout_qualification(plan.get("qualification"))
+    actions = plan["actions"]
+    qualification_ordinals = [
+        action["ordinal"] for action in actions if action["kind"] == "target-full"
+    ]
+    if len(qualification_ordinals) != 1:
+        raise RecoveryError(
+            "completed upgrade does not contain exactly one target-full action"
+        )
+    receipt = document["rolloutActionResults"][qualification_ordinals[0]].get(
+        "qualificationEvidence"
+    )
+    receipt = validate_qualification_evidence_receipt(receipt)
+    expected_path = _qualification_material_path(evidence_path, manifest=False)
+    if not _is_sha256(evidence_self_sha256) or not _is_sha256(
+        rollout_binding_sha256
+    ):
+        raise RecoveryError("qualification evidence lookup digest is invalid")
+    if (
+        receipt["evidencePath"] != expected_path
+        or receipt["evidenceSelfSha256"] != evidence_self_sha256
+        or receipt["rolloutBindingSha256"] != rollout_binding_sha256
+    ):
+        raise RecoveryError(
+            "qualification evidence does not match the completed transaction receipt"
+        )
+    return receipt
 
 
 def _approved_deployment(document: dict[str, Any]) -> CatalogDeploymentSpec | None:
@@ -1018,11 +1268,80 @@ class TransactionStore:
         key = hashlib.sha256(transaction_id.encode("utf-8")).hexdigest()
         return self.archive_dir / f"{key}.json"
 
-    @staticmethod
-    def _read_private_document(path: Path) -> dict[str, Any]:
-        document = _read_private_json(path, label="transaction archive")
-        TransactionStore._validate(document)
-        return document
+    def _read_archive(self, transaction_id: str) -> dict[str, Any] | None:
+        """Read one archive beneath a stable private no-follow directory."""
+
+        archive = self.archive_path(transaction_id)
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            directory_descriptor = os.open(self.archive_dir, flags)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise RecoveryError(
+                f"cannot open the transaction archive directory: {error}"
+            ) from error
+        try:
+            metadata = os.fstat(directory_descriptor)
+            try:
+                named = self.archive_dir.lstat()
+            except OSError as error:
+                raise RecoveryError(
+                    f"cannot inspect the transaction archive directory: {error}"
+                ) from error
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+                or (named.st_dev, named.st_ino)
+                != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise RecoveryError(
+                    "transaction archive directory is not private and current-user-owned"
+                )
+            try:
+                os.stat(
+                    archive.name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return None
+            document = _read_private_json_at(
+                directory_descriptor,
+                archive.name,
+                label="transaction archive",
+            )
+            try:
+                named_final = self.archive_dir.lstat()
+            except OSError as error:
+                raise RecoveryError(
+                    f"transaction archive directory changed while it was read: {error}"
+                ) from error
+            if (named_final.st_dev, named_final.st_ino) != (
+                metadata.st_dev,
+                metadata.st_ino,
+            ):
+                raise RecoveryError(
+                    "transaction archive directory changed while it was read"
+                )
+            self._validate(document)
+            if not is_terminal(document):
+                raise RecoveryError(
+                    "transaction archive does not contain a terminal transaction"
+                )
+            if document.get("id") != transaction_id:
+                raise RecoveryError(
+                    "transaction archive content does not match the requested id"
+                )
+            return document
+        finally:
+            os.close(directory_descriptor)
 
     def _archive_terminal(self, document: dict[str, Any]) -> Path:
         """Persist one exact terminal document before its single-slot pointer moves."""
@@ -1183,6 +1502,37 @@ class TransactionStore:
         document = _read_private_json(self.path, label="transaction state")
         self._validate(document)
         return document
+
+    def read_by_id(self, transaction_id: str) -> dict[str, Any] | None:
+        """Safely read an exact current or archived transaction by identity."""
+
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise RecoveryError("transaction lookup requires a non-empty id")
+        with self.locked():
+            current = self.read()
+            if current is not None and current.get("id") == transaction_id:
+                return current
+            return self._read_archive(transaction_id)
+
+    def completed_upgrade_qualification(
+        self,
+        transaction_id: str,
+        *,
+        evidence_path: str,
+        evidence_self_sha256: str,
+        rollout_binding_sha256: str,
+    ) -> dict[str, Any]:
+        """Resolve an evidence identity through its exact completed transaction."""
+
+        document = self.read_by_id(transaction_id)
+        if document is None:
+            raise RecoveryError("qualification transaction does not exist")
+        return verify_completed_upgrade_qualification(
+            document,
+            evidence_path=evidence_path,
+            evidence_self_sha256=evidence_self_sha256,
+            rollout_binding_sha256=rollout_binding_sha256,
+        )
 
     @staticmethod
     def _validate(document: Any) -> None:
@@ -1475,6 +1825,71 @@ class TransactionStore:
                 artifact_sha256=artifact_sha256,
             )
 
+    def pending_rollout_qualification_binding(
+        self,
+        *,
+        transaction_id: str,
+        catalog_spec_sha256: str,
+        catalog_id: str,
+        rollout_subject: str | None = None,
+        action_ordinal: int | None = None,
+        action_kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind evidence creation to the one active pending ``target-full`` action."""
+
+        try:
+            if str(uuid.UUID(transaction_id)) != transaction_id:
+                raise ValueError
+        except ValueError as error:
+            raise RecoveryError(
+                "control transaction id must be a canonical UUID"
+            ) from error
+        rollout_subject, action_ordinal, action_kind = (
+            _rollout_binding_from_environment(
+                rollout_subject, action_ordinal, action_kind
+            )
+        )
+        if rollout_subject != "target" or action_kind != "target-full":
+            raise RecoveryError(
+                "full qualification requires target-full rollout authority"
+            )
+        with self.locked():
+            document = self.read()
+            if (
+                not document
+                or is_terminal(document)
+                or document.get("schemaVersion") != SCHEMA_VERSION
+                or document.get("id") != transaction_id
+                or document.get("operation") != "upgrade"
+                or document.get("state") != "accepting"
+            ):
+                raise RecoveryError(
+                    "full qualification transaction is missing, changed, or terminal"
+                )
+            _require_rollout_action(
+                document,
+                catalog_spec_sha256=catalog_spec_sha256,
+                catalog_id=catalog_id,
+                rollout_subject=rollout_subject,
+                action_ordinal=action_ordinal,
+                action_kind=action_kind,
+            )
+            intent = _rollout_intent(document, _approved_deployment(document))
+            assert intent is not None
+            plan = intent["rolloutPlan"]
+            if (
+                plan.get("schemaVersion") != 2
+                or plan.get("requiredAcceptanceTier") != "full"
+            ):
+                raise RecoveryError(
+                    "pending rollout action has no exact full qualification contract"
+                )
+            _validated_rollout_qualification(plan.get("qualification"))
+            assert isinstance(action_ordinal, int)
+            return _qualification_binding(
+                document, intent, plan["actions"][action_ordinal]
+            )
+
     def fence_orphaned(self, *, expected_id: str) -> dict[str, Any]:
         """Fence a proven-dead initiator while excluding descendant runtime work."""
         with self.runtime_boundary():
@@ -1599,12 +2014,10 @@ class TransactionStore:
         expected_state: str,
         expected_action_ordinal: int,
         expected_action_kind: str,
-        result_sha256: str,
+        result_sha256: str | None = None,
+        qualification_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """CAS one exact typed action result into the durable rollout journal."""
-
-        if not _is_sha256(result_sha256):
-            raise RecoveryError("rollout action result SHA256 is invalid")
         with self.locked():
             document = self.read()
             if not document or document.get("id") != expected_id:
@@ -1641,17 +2054,52 @@ class TransactionStore:
                 raise RecoveryError(
                     "rollout action kind does not match the next pending action"
                 )
-            completed_at = utc_now()
-            document["rolloutActionResults"].append(
-                {
+            result: dict[str, Any]
+            if action["kind"] == "target-full":
+                if document.get("state") != "accepting":
+                    raise RecoveryError(
+                        "target-full can complete only in the accepting state"
+                    )
+                if result_sha256 is not None:
+                    raise RecoveryError(
+                        "target-full result SHA256 is derived from its evidence receipt"
+                    )
+                receipt = validate_qualification_evidence_receipt(
+                    qualification_evidence
+                )
+                binding = _qualification_binding(document, intent, action)
+                if receipt["rolloutBindingSha256"] != canonical_sha256(binding):
+                    raise RecoveryError(
+                        "qualification evidence receipt does not match the pending rollout binding"
+                    )
+                normalized_result_sha256 = _qualification_result_sha256(
+                    action, receipt
+                )
+                result = {
+                    "ordinal": expected_action_ordinal,
+                    "kind": action["kind"],
+                    "subject": action["subject"],
+                    "catalogId": action["catalogId"],
+                    "resultSha256": normalized_result_sha256,
+                    "qualificationEvidence": receipt,
+                }
+            else:
+                if qualification_evidence is not None:
+                    raise RecoveryError(
+                        "only target-full may persist qualification evidence"
+                    )
+                if not _is_sha256(result_sha256):
+                    raise RecoveryError("rollout action result SHA256 is invalid")
+                result = {
                     "ordinal": expected_action_ordinal,
                     "kind": action["kind"],
                     "subject": action["subject"],
                     "catalogId": action["catalogId"],
                     "resultSha256": result_sha256,
-                    "completedAt": completed_at,
                 }
-            )
+            completed_at = utc_now()
+            result["completedAt"] = completed_at
+            document["rolloutActionResults"].append(result)
             document["rolloutActionOrdinal"] = expected_action_ordinal + 1
             document["updatedAt"] = completed_at
             _validate_rollout_progress(document, intent)

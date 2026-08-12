@@ -6,8 +6,9 @@ Profile 切换和服务重建合并成一个未经评审的动作。
 当前 Tier-1 主机已经完成独立的 owner-migration 维护切片：历史 v1 事务显式解析、私有 selection
 规范化、Docker restart policy 迁移为 `no`，并通过“停止 runtime → systemd supervisor 恢复 →
 post-start 健康与实际身份检查”演练。仓库也已具备类型化 upgrade/rollback 的控制面基础，但尚未
-在真实 LTS/rollback 模型对上完成 rollout、重启与 full qualification 演练。因此这不是 Phase B
-完成或新的 qualification 结论。
+在真实 LTS/rollback 模型对上完成 rollout、重启与 full qualification 演练。本轮已把 full runner、
+冻结输入和最终 receipt 纳入同一 typed rollout，但这仍不是 Phase B 完成或新的实机 qualification
+结论。
 
 ## 1. 升级前准备（不改变 runtime）
 
@@ -75,6 +76,11 @@ python3 scripts/check-doc-commands.py
 ./stack upgrade --model CATALOG_ID
 ./stack upgrade --model CATALOG_ID --yes
 
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full --yes
+
 ./stack rollback
 ./stack rollback --yes
 ```
@@ -89,9 +95,24 @@ python3 scripts/check-doc-commands.py
   subject、kind 或 transaction ID。
 
 执行时，控制面在 runtime/transaction 双锁内保存源的 immutable rollback-spec v1 和旧 pointer，
-然后按持久计划依次运行源 quick、获取目标制品、停止源、选择并启动目标、运行目标 quick，最后才
-复核源锚点并发布一次性 rollback pointer。每一步结果摘要和下一步 action 都由事务 CAS 绑定；
-失败或中断进入 `recovery_required`，不能开始另一次变更。
+然后按持久计划依次运行源 quick、获取目标制品、停止源、选择并启动目标、运行目标 quick。默认
+`--qualification quick` 保持 rollout plan v1，并在 target quick 后复核源锚点、发布一次性 rollback
+pointer。显式 `--qualification full` 使用 plan v2，在发布 pointer 前增加 `target-full` action。
+每一步结果摘要和下一步 action 都由事务 CAS 绑定；失败或中断进入 `recovery_required`，不能开始
+另一次变更。
+
+full 预检要求 `MODELPORT_PROJECT_DIR` 是绝对、无路径替身、当前用户拥有且不可被 group/other
+写入的 clean Git checkout；`127.0.0.1:38082/livez` 返回的 revision/source state 必须与 checkout
+一致，并且 source identity v2 要求 live `build.configSha256` 精确等于受审 `config.toml`。当前 live
+ModelPort 尚未暴露该字段，所以跨仓升级前 full 会在事务和停机前按设计拒绝。compatibility
+检查还必须返回并匹配其实际读取的 raw contract/config/governance 摘要；authenticated registry
+只证明 logical aliases 由 `local_qwen` 暴露，不冒充 physical target identity；local Tool 请求固定
+为 `local_strict`，不允许云回退。runner 将 schema v2 manifest 和 schema v5 evidence 确定性绑定到
+transaction/plan/action、
+source/target/rollback spec、controller materials、acceptance configuration、目标容器进程身份和
+ModelPort commit/tree/material/live build。控制面持有 runtime boundary，重读并验证两份 `0600`
+记录后才将 receipt 写入 action journal。只有 exact completed upgrade 的 receipt 才能让 v5 evidence
+具备 qualification 语义；在写 receipt 前崩溃、恢复源 runtime 或替换文件都不能留下可消费证据。
 
 rollback-spec v1 的 scope 固定为 `same-controller-same-catalog-anchor-v1`。它只允许同一可信主机、
 同一精确控制器材料集合、当前 Catalog 中同一 rollback anchor、`latency` Profile，以及已经存在于
@@ -111,15 +132,20 @@ rollback 在同一事务中停止当前源、写入已验证锚点 selection、�
 因此当前真实 upgrade/rollback 会在准入阶段 fail closed。这是预期行为，不能通过手写 Catalog、
 evidence、pointer 或 selection 绕过。
 
-旧 `release`/candidate 流程仍用于兼容性候选检查，不是正式 upgrade 的替代入口。只有目标主机
-完成对应独立 `full` qualification 后，才能更新 Catalog 状态或 deployment manifest；估算条目
-不能仅凭相似硬件或事务内 quick 晋级。
+旧 `release`/candidate 流程仍用于兼容性候选检查，不是正式 upgrade 的替代入口。正式 typed
+replacement 应完成对应 transaction-bound `full` qualification，并通过独立的签名与晋级评审后，
+才能更新 Catalog 状态或 deployment manifest；估算条目不能仅凭相似硬件、事务内 quick 或一份
+未被 completed receipt 引用的 v5 JSON 晋级。当前消费者仍为符合全部旧策略的 standalone schema
+v4 `full` 保留临时 promotion bridge；它不证明 rollout 完成，待 typed candidate qualification
+替代并验证后才能删除。
 
 ## 4. schema、生成文件和 manifest
 
-兼容范围按 schema 单独声明，不笼统承诺 N-1。runtime Profile 与 transaction 当前为 v2；类型化
-upgrade/rollback 在 v2 transaction 中保存 rollout intent、精确 action plan、逐步结果和 action
-ordinal。rollback spec 与单调 pointer 各为 v1，保存在私有 content-addressed store 中。当前
+兼容范围按 schema 单独声明，不笼统承诺 N-1。runtime Profile 与 transaction 当前为 v2；quick
+upgrade/rollback 保留 rollout plan/intent v1，full upgrade 使用 rollout plan/intent v2，并保存
+精确 qualification contract、逐步结果和 receipt。standalone acceptance run/evidence 保留 v1/v4
+读取；transaction-bound full 使用 run/evidence v2/v5，且 v5 的资格取决于 completed transaction
+反向引用。rollback spec 与单调 pointer 各为 v1，保存在私有 content-addressed store 中。当前
 Tier-1 主机的历史 v1 transaction 已经显式解析，但通用 v1 reader 在 Phase B 完成前仍须保留。
 其他主机遇到旧 `failed` transaction 仍必须先分类当前 runtime，不能自动改写为安全终态。bundle 当前
 为 v2：v1 的纯制品 bundle 可只读验证/导入，带未绑定镜像 archive 的 v1 bundle 必须用当前工具重建；
@@ -157,9 +183,9 @@ rollback 恢复的是同一控制器和当前 Catalog 仍认可的精确锚点�
 撤销相关证据并按 [SECURITY.md](../SECURITY.md) 的私密渠道处理；不要把普通 availability rollback
 当成安全事件处置。
 
-Phase B 仍未完成。当前实现已把类型化 plan、锚点、action authorization、quick 服务门禁和失败
-恢复接入持久事务，但还需要把 `full` qualification 的 runner 记录和结论完整绑定到同一 rollout
-transaction，并在具备合法 validated LTS/rollback 模型对后完成一次 Tier-1 真实 upgrade→rollback
+Phase B 仍未完成。当前实现已把类型化 plan、锚点、action authorization、quick 服务门禁、
+transaction-bound full receipt 和失败恢复接入持久事务，但还需要在具备合法 validated
+LTS/rollback 模型对后完成一次 Tier-1 真实 upgrade→rollback
 演练。真实 WSL shutdown/reboot、Docker 延迟就绪和事务恢复 drill，以及当前代码/config 的 full
 host qualification 也仍待完成。这些门槛关闭前禁止开始 Phase C，不能删除仍承担 schema、candidate
 或恢复职责的兼容路径。

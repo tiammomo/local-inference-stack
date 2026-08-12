@@ -29,6 +29,22 @@ from . import (
     storage,
 )
 from .paths import ProjectPaths
+from .performance import (
+    PerformancePolicyError,
+    ResolvedPerformancePolicy,
+    resolve_catalog_performance_policy,
+)
+from .acceptance import (
+    ROLLOUT_EVIDENCE_SCHEMA_VERSION,
+    ROLLOUT_RUN_SCHEMA_VERSION,
+    acceptance_evidence_shape_valid,
+    modelport_source_identity_valid,
+    qualification_input_valid,
+    rollout_binding_valid,
+    run_manifest_matches_evidence,
+    run_record_valid,
+    sha256_document,
+)
 from .deployment import (
     ActionKind,
     CatalogDeploymentSpec,
@@ -39,7 +55,7 @@ from .deployment import (
     load_approved_catalog_spec,
     parse_deployment_plan,
 )
-from .materials import canonical_sha256
+from .materials import MaterialError, canonical_sha256, read_private_json_file
 from .result import (
     AdmissionError,
     CommandResult,
@@ -67,12 +83,15 @@ from .rollout_runtime import (
     write_anchor_selection,
 )
 from .transactions import (
+    QUALIFICATION_RECEIPT_POLICY_ID,
     RECOVERY_DEPLOYMENT_KEYS,
     RECOVERY_REQUIRED_DEPLOYMENT_KEYS,
     SCHEMA_VERSION as TRANSACTION_SCHEMA_VERSION,
     ROLLOUT_INTENT_POLICY_ID,
+    ROLLOUT_INTENT_POLICY_ID_V2,
     TransactionStore,
     recovery_original_is_safe,
+    validate_qualification_evidence_receipt,
 )
 
 
@@ -128,6 +147,12 @@ def parser() -> argparse.ArgumentParser:
         help="replace production through one typed maintenance-window transaction",
     )
     upgrade.add_argument("--model", required=True)
+    upgrade.add_argument(
+        "--qualification",
+        choices=("quick", "full"),
+        default="quick",
+        help="require a transaction-bound full qualification before publication",
+    )
     upgrade.add_argument("--yes", action="store_true")
 
     rollback_parser = commands.add_parser(
@@ -930,7 +955,11 @@ def _rollout_intent(
     previous_pointer: RollbackPointer | None,
 ) -> dict[str, Any]:
     return {
-        "policyId": ROLLOUT_INTENT_POLICY_ID,
+        "policyId": (
+            ROLLOUT_INTENT_POLICY_ID_V2
+            if plan.schema_version == 2
+            else ROLLOUT_INTENT_POLICY_ID
+        ),
         "rollbackSpecSha256": rollback_spec.sha256,
         "sourceCatalogSpecSha256": source.sha256,
         "targetCatalogSpecSha256": target.sha256,
@@ -986,6 +1015,238 @@ def _advance_rollout(
     )
 
 
+def _strict_private_qualification_json(
+    paths: ProjectPaths,
+    relative: Path,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], str]:
+    """Read one bounded private qualification record without following links."""
+
+    if (
+        relative.is_absolute()
+        or relative.parts[:2] != ("logs", "acceptance")
+        or ".." in relative.parts
+        or relative.suffix != ".json"
+    ):
+        raise IntegrityError(f"{label} path is outside the private acceptance store")
+    try:
+        return read_private_json_file(
+            paths.root / relative,
+            root=paths.root,
+            maximum_bytes=1024 * 1024,
+        )
+    except (MaterialError, OSError, ValueError) as error:
+        raise IntegrityError(f"{label} is unavailable or unsafe") from error
+
+
+def _modelport_qualification_preflight(
+    paths: ProjectPaths,
+    target: CatalogDeploymentSpec,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Use the evidence writer's single ModelPort qualification contract."""
+
+    encoded = os.environ.get("MODELPORT_PROJECT_DIR", "")
+    if not encoded or not Path(encoded).is_absolute():
+        raise ConfigError(
+            "full qualification requires an absolute MODELPORT_PROJECT_DIR"
+        )
+    checkout = Path(os.path.abspath(encoded))
+    result = run(
+        [
+            "scripts/acceptance-evidence.py",
+            "qualification-preflight",
+            "--modelport-project",
+            str(checkout),
+            "--catalog-model-id",
+            target.catalog_id,
+            "--catalog-spec-sha256",
+            target.sha256,
+        ],
+        cwd=paths.root,
+        timeout=60,
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise AdmissionError(
+            "ModelPort qualification preflight returned invalid JSON"
+        ) from error
+    identity = (
+        payload.get("modelPortSourceIdentity")
+        if isinstance(payload, dict)
+        else None
+    )
+    qualification_input = (
+        payload.get("qualificationInput") if isinstance(payload, dict) else None
+    )
+    prerequisites = (
+        payload.get("prerequisites") if isinstance(payload, dict) else None
+    )
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schemaVersion",
+            "status",
+            "modelPortSourceIdentity",
+            "qualificationInput",
+            "prerequisites",
+        }
+        or payload.get("schemaVersion") != 2
+        or payload.get("status") != "ready"
+        or not modelport_source_identity_valid(identity)
+        or not isinstance(qualification_input, dict)
+        or not qualification_input_valid(qualification_input)
+        or qualification_input.get("targetCatalogSpecSha256") != target.sha256
+        or qualification_input.get("servedModelId") != target.served_model_id
+        or qualification_input.get("modelPortSourceIdentitySha256")
+        != sha256_document(identity)
+        or qualification_input.get("sha256")
+        != sha256_document(
+            {
+                key: value
+                for key, value in qualification_input.items()
+                if key != "sha256"
+            }
+        )
+        or prerequisites
+        != {
+            "nodeMajor": 24,
+            "credentials": "available",
+            "providerCompatibility": "passed",
+            "dashboard": "ok",
+        }
+    ):
+        raise AdmissionError(
+            "ModelPort qualification preflight did not establish a ready identity"
+        )
+    return str(checkout), identity, qualification_input
+
+
+def _target_performance_preflight(
+    paths: ProjectPaths,
+    target: CatalogDeploymentSpec,
+) -> ResolvedPerformancePolicy:
+    """Resolve the exact target policy before a rollout transaction exists."""
+
+    try:
+        document = catalog.load_catalog(paths.root / "catalog" / "models.json")
+        model = catalog.model_by_id(document, target.catalog_id)
+        if CatalogDeploymentSpec.from_catalog_model(model).sha256 != target.sha256:
+            raise IntegrityError(
+                "target Catalog identity changed before performance preflight"
+            )
+        return resolve_catalog_performance_policy(
+            paths.root, model, require_enforced=True
+        )
+    except (catalog.CatalogError, DeploymentSpecError, PerformancePolicyError) as error:
+        raise AdmissionError(
+            "target has no enforced reviewed performance policy"
+        ) from error
+
+
+def _qualification_evidence_receipt(
+    paths: ProjectPaths,
+    transaction: TransactionStore,
+    state: dict[str, Any],
+    target: CatalogDeploymentSpec,
+    action: Any,
+) -> dict[str, Any]:
+    """Verify a passed v5 record and return its exact transaction receipt."""
+
+    binding = transaction.pending_rollout_qualification_binding(
+        transaction_id=state["id"],
+        catalog_spec_sha256=target.sha256,
+        catalog_id=target.catalog_id,
+        rollout_subject=action.subject,
+        action_ordinal=action.ordinal,
+        action_kind=action.kind.value,
+    )
+    if not rollout_binding_valid(binding):
+        raise IntegrityError("transaction returned an invalid qualification binding")
+    basename = f"qualification-{state['id']}-{action.ordinal}"
+    evidence_relative = Path("logs") / "acceptance" / f"{basename}.json"
+    manifest_relative = Path("logs") / "acceptance" / f"{basename}.run.json"
+    evidence, evidence_sha256 = _strict_private_qualification_json(
+        paths, evidence_relative, label="qualification evidence"
+    )
+    manifest, manifest_sha256 = _strict_private_qualification_json(
+        paths, manifest_relative, label="qualification run manifest"
+    )
+    configuration = evidence.get("configuration")
+    run_record = evidence.get("run")
+    manifest_identity = (
+        run_record.get("manifest") if isinstance(run_record, dict) else None
+    )
+    frozen_inputs = evidence.get("frozenInputs")
+    if (
+        not acceptance_evidence_shape_valid(evidence)
+        or evidence.get("schemaVersion") != ROLLOUT_EVIDENCE_SCHEMA_VERSION
+        or evidence.get("evidenceId") != basename
+        or evidence.get("mode") != "full"
+        or evidence.get("profile") != "latency"
+        or evidence.get("status") != "passed"
+        or evidence.get("exitCode") != 0
+        or evidence.get("failedAtStep") is not None
+        or evidence.get("catalogModelId") != target.catalog_id
+        or evidence.get("rolloutBinding") != binding
+        or not isinstance(configuration, dict)
+        or not isinstance(run_record, dict)
+        or run_record.get("schemaVersion") != ROLLOUT_RUN_SCHEMA_VERSION
+        or not isinstance(manifest_identity, dict)
+        or manifest_identity.get("sourcePath") != manifest_relative.as_posix()
+        or manifest_identity.get("sourceSha256") != manifest_sha256
+        or manifest_identity.get("selfSha256") != manifest.get("selfSha256")
+        or manifest.get("schemaVersion") != ROLLOUT_RUN_SCHEMA_VERSION
+        or manifest.get("selfSha256")
+        != sha256_document(
+            {key: value for key, value in manifest.items() if key != "selfSha256"}
+        )
+        or evidence.get("selfSha256")
+        != sha256_document(
+            {key: value for key, value in evidence.items() if key != "selfSha256"}
+        )
+        or not isinstance(frozen_inputs, dict)
+        or frozen_inputs.get("targetCatalogSpecSha256") != target.sha256
+        or not run_record_valid(
+            run_record,
+            mode="full",
+            overall_status="passed",
+            overall_exit_code=0,
+            configuration=configuration,
+        )
+        or not run_manifest_matches_evidence(manifest, run_record, evidence)
+    ):
+        raise IntegrityError(
+            "full qualification evidence is incomplete, changed, or not transaction-bound"
+        )
+    binding_after = transaction.pending_rollout_qualification_binding(
+        transaction_id=state["id"],
+        catalog_spec_sha256=target.sha256,
+        catalog_id=target.catalog_id,
+        rollout_subject=action.subject,
+        action_ordinal=action.ordinal,
+        action_kind=action.kind.value,
+    )
+    if binding_after != binding:
+        raise RecoveryError("qualification transaction changed while evidence was read")
+    receipt = {
+        "policyId": QUALIFICATION_RECEIPT_POLICY_ID,
+        "evidencePath": evidence_relative.as_posix(),
+        "evidenceSha256": evidence_sha256,
+        "evidenceSelfSha256": evidence["selfSha256"],
+        "runManifestPath": manifest_relative.as_posix(),
+        "runManifestSha256": manifest_sha256,
+        "runManifestSelfSha256": manifest["selfSha256"],
+        "stepResultsSha256": sha256_document(run_record["stepResults"]),
+        "configurationSha256": sha256_document(configuration),
+        "runtimeIdentitySha256": frozen_inputs["liveRuntimeIdentitySha256"],
+        "rolloutBindingSha256": sha256_document(binding),
+    }
+    return validate_qualification_evidence_receipt(receipt)
+
+
 def _execute_upgrade_rollout(
     paths: ProjectPaths,
     transaction: TransactionStore,
@@ -994,9 +1255,33 @@ def _execute_upgrade_rollout(
     target: CatalogDeploymentSpec,
     rollback_spec: RollbackSpec,
     previous_pointer: RollbackPointer | None,
+    *,
+    qualification: str = "quick",
+    modelport_project_dir: str | None = None,
+    qualification_input: dict[str, Any] | None = None,
+    performance_policy: ResolvedPerformancePolicy | None = None,
 ) -> dict[str, Any]:
     plan = build_upgrade_rollout_plan(
-        source, target, rollback_spec.sha256, admission_granted=True
+        source,
+        target,
+        rollback_spec.sha256,
+        admission_granted=True,
+        required_acceptance_tier=qualification,
+        performance_policy_sha256=(
+            performance_policy.policy_sha256
+            if performance_policy is not None
+            else None
+        ),
+        modelport_source_identity_sha256=(
+            qualification_input.get("modelPortSourceIdentitySha256")
+            if qualification_input is not None
+            else None
+        ),
+        qualification_input_sha256=(
+            qualification_input.get("sha256")
+            if qualification_input is not None
+            else None
+        ),
     )
     store = RollbackStore(paths)
     for action in plan.actions:
@@ -1038,6 +1323,25 @@ def _execute_upgrade_rollout(
             )
             output = result.stdout[-4000:]
         elif action.kind is RolloutActionKind.STOP_SOURCE:
+            if qualification == "full":
+                (
+                    rechecked_modelport_dir,
+                    _rechecked_modelport_identity,
+                    rechecked_qualification_input,
+                ) = _modelport_qualification_preflight(paths, target)
+                rechecked_performance = _target_performance_preflight(paths, target)
+                if (
+                    rechecked_modelport_dir != modelport_project_dir
+                    or rechecked_qualification_input != qualification_input
+                    or performance_policy is None
+                    or rechecked_performance.policy_sha256
+                    != performance_policy.policy_sha256
+                    or rechecked_performance.manifest_sha256
+                    != performance_policy.manifest_sha256
+                ):
+                    raise IntegrityError(
+                        "full qualification inputs changed before stopping production"
+                    )
             state = transaction.transition(
                 "production_stopping",
                 expected_id=state["id"],
@@ -1096,6 +1400,92 @@ def _execute_upgrade_rollout(
                 env=environment,
             )
             output = result.stdout[-8000:]
+        elif action.kind is RolloutActionKind.TARGET_FULL:
+            if (
+                not modelport_project_dir
+                or not isinstance(qualification_input, dict)
+                or performance_policy is None
+            ):
+                raise ConfigError(
+                    "full qualification requires its preflighted provider inputs"
+                )
+            provider_model = qualification_input.get("providerMatrixModel")
+            tool_tokens = qualification_input.get("toolUseMaxTokens")
+            if (
+                not qualification_input_valid(qualification_input)
+                or not isinstance(provider_model, str)
+                or not isinstance(tool_tokens, int)
+            ):
+                raise ConfigError("full qualification provider workload is invalid")
+            # Hold the runtime boundary from the pending-action check through
+            # evidence verification and receipt CAS. The transaction file lock
+            # remains short-lived inside those calls, so runner subprocesses
+            # can revalidate the same pending action without deadlocking.
+            with transaction.runtime_boundary():
+                transaction.pending_rollout_qualification_binding(
+                    transaction_id=state["id"],
+                    catalog_spec_sha256=target.sha256,
+                    catalog_id=target.catalog_id,
+                    rollout_subject=action.subject,
+                    action_ordinal=action.ordinal,
+                    action_kind=action.kind.value,
+                )
+                result = run(
+                    ["scripts/acceptance-suite.sh", "full"],
+                    cwd=paths.root,
+                    timeout=86400,
+                    env={
+                        **environment,
+                        "MODELPORT_PROJECT_DIR": modelport_project_dir,
+                        "LOCAL_INFERENCE_PROVIDER_MATRIX_MODEL": provider_model,
+                        "LOCAL_INFERENCE_TOOL_USE_MAX_TOKENS": str(tool_tokens),
+                        "LOCAL_INFERENCE_SERVED_MODEL_ID": qualification_input[
+                            "servedModelId"
+                        ],
+                        "LOCAL_INFERENCE_LOGICAL_FAST_MODEL": "qwen3.5-fast",
+                        "LOCAL_INFERENCE_LOGICAL_CODE_MODEL": "qwen3.5-code",
+                        "LOCAL_INFERENCE_LOGICAL_DEEP_MODEL": "qwen3.5-deep",
+                        "LOCAL_INFERENCE_DIRECT_CONTEXT_TOKENS": str(
+                            qualification_input["directContextTokens"]
+                        ),
+                        "LOCAL_INFERENCE_MODELPORT_CONTEXT_TOKENS": str(
+                            qualification_input["modelPortContextTokens"]
+                        ),
+                        "LOCAL_INFERENCE_MODELPORT_CONTEXT_MAX_TOKENS": str(
+                            qualification_input["modelPortContextMaxTokens"]
+                        ),
+                        "LOCAL_INFERENCE_DECODE_TOKENS": str(
+                            qualification_input["decodeTokens"]
+                        ),
+                        "LOCAL_INFERENCE_DECODE_CONTEXT_TOKENS": str(
+                            qualification_input["decodeContextTokens"]
+                        ),
+                        "LOCAL_INFERENCE_CONCURRENCY": str(
+                            qualification_input["concurrency"]
+                        ),
+                        "LOCAL_INFERENCE_CONCURRENCY_TOKENS": str(
+                            qualification_input["concurrencyTokens"]
+                        ),
+                        "LOCAL_INFERENCE_PERFORMANCE_MANIFEST": (
+                            performance_policy.manifest_relative_path
+                        ),
+                        "LOCAL_INFERENCE_PERFORMANCE_POLICY_SHA256": (
+                            performance_policy.policy_sha256
+                        ),
+                    },
+                )
+                output = result.stdout[-8000:]
+                receipt = _qualification_evidence_receipt(
+                    paths, transaction, state, target, action
+                )
+                state = transaction.advance_rollout_action(
+                    expected_id=state["id"],
+                    expected_state=state["state"],
+                    expected_action_ordinal=action.ordinal,
+                    expected_action_kind=action.kind.value,
+                    qualification_evidence=receipt,
+                )
+            continue
         elif action.kind is RolloutActionKind.PUBLISH_ROLLBACK:
             transaction.assert_approved_deployment(
                 transaction_id=state["id"],
@@ -1136,6 +1526,9 @@ def _execute_upgrade_rollout(
 
 
 def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
+    qualification = getattr(args, "qualification", "quick")
+    if qualification not in {"quick", "full"}:
+        raise UsageError("upgrade qualification must be quick or full")
     source, _selection = _selected_catalog_spec(paths)
     if source.catalog_id == args.model:
         raise UsageError("upgrade target must differ from the selected source")
@@ -1148,6 +1541,36 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
     )
     if admitted_source.sha256 != source.sha256:
         raise IntegrityError("source admission changed the selected Catalog subject")
+    modelport_project_dir: str | None = None
+    modelport_identity: dict[str, Any] | None = None
+    qualification_input: dict[str, Any] | None = None
+    performance_policy: ResolvedPerformancePolicy | None = None
+    if qualification == "full":
+        (
+            modelport_project_dir,
+            modelport_identity,
+            qualification_input,
+        ) = _modelport_qualification_preflight(
+            paths, target
+        )
+        performance_policy = _target_performance_preflight(paths, target)
+        # Reject a pending/failed production performance policy before a
+        # transaction exists or the maintenance window stops the source. The
+        # bound acceptance run repeats this as its first step to close drift.
+        run(
+            [
+                "python3",
+                "src/local_inference_stack/performance.py",
+                "--manifest",
+                performance_policy.manifest_relative_path,
+                "--expected-policy-sha256",
+                performance_policy.policy_sha256,
+                "--catalog-id",
+                target.catalog_id,
+            ],
+            cwd=paths.root,
+            timeout=300,
+        )
     facts = {
         "scopePolicy": "same-controller-same-catalog-anchor-v1",
         "sourceCatalogId": source.catalog_id,
@@ -1155,7 +1578,19 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
         "targetCatalogId": target.catalog_id,
         "targetCatalogSpecSha256": target.sha256,
         "networkAcquisitionOnRollbackAllowed": False,
+        "requiredAcceptanceTier": qualification,
         "qualificationProduced": False,
+        "modelPortIdentity": modelport_identity,
+        "qualificationInput": qualification_input,
+        "performancePolicy": (
+            {
+                "manifestPath": performance_policy.manifest_relative_path,
+                "manifestSha256": performance_policy.manifest_sha256,
+                "policySha256": performance_policy.policy_sha256,
+            }
+            if performance_policy is not None
+            else None
+        ),
         "sourceAdmission": source_admission,
         "targetAdmission": target_admission,
     }
@@ -1181,7 +1616,8 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
             facts={**facts, "dryRun": True},
             nextActions=[
                 NextAction(
-                    f"./stack upgrade --model {target.catalog_id} --yes",
+                    "./stack upgrade --model "
+                    f"{target.catalog_id} --qualification {qualification} --yes",
                     "capture an immutable source anchor and execute the typed maintenance window",
                     True,
                 )
@@ -1207,6 +1643,29 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
             or locked_target.sha256 != target.sha256
         ):
             raise IntegrityError("Catalog or selected rollout subject changed during locked capture")
+        locked_qualification_input = qualification_input
+        locked_performance_policy = performance_policy
+        if qualification == "full":
+            (
+                locked_modelport_dir,
+                _locked_modelport_identity,
+                locked_qualification_input,
+            ) = _modelport_qualification_preflight(paths, locked_target)
+            locked_performance_policy = _target_performance_preflight(
+                paths, locked_target
+            )
+            if (
+                locked_modelport_dir != modelport_project_dir
+                or locked_qualification_input != qualification_input
+                or performance_policy is None
+                or locked_performance_policy.policy_sha256
+                != performance_policy.policy_sha256
+                or locked_performance_policy.manifest_sha256
+                != performance_policy.manifest_sha256
+            ):
+                raise IntegrityError(
+                    "full qualification inputs changed during locked capture"
+                )
         original = _original_runtime(paths)
         rollback_spec = capture_rollback_spec(
             paths,
@@ -1218,7 +1677,26 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
         store.put(rollback_spec)
         previous_pointer = store.read_pointer()
         plan = build_upgrade_rollout_plan(
-            source, target, rollback_spec.sha256, admission_granted=True
+            source,
+            target,
+            rollback_spec.sha256,
+            admission_granted=True,
+            required_acceptance_tier=qualification,
+            performance_policy_sha256=(
+                locked_performance_policy.policy_sha256
+                if locked_performance_policy is not None
+                else None
+            ),
+            modelport_source_identity_sha256=(
+                locked_qualification_input.get("modelPortSourceIdentitySha256")
+                if locked_qualification_input is not None
+                else None
+            ),
+            qualification_input_sha256=(
+                locked_qualification_input.get("sha256")
+                if locked_qualification_input is not None
+                else None
+            ),
         )
         captured.update(
             {"rollbackSpec": rollback_spec, "previousPointer": previous_pointer}
@@ -1238,6 +1716,14 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
         approved_catalog_spec=target.approval_document(),
     )
     try:
+        execution_arguments: dict[str, Any] = {}
+        if qualification == "full":
+            execution_arguments = {
+                "qualification": qualification,
+                "modelport_project_dir": modelport_project_dir,
+                "qualification_input": qualification_input,
+                "performance_policy": performance_policy,
+            }
         state = _execute_upgrade_rollout(
             paths,
             transaction,
@@ -1246,15 +1732,32 @@ def _upgrade(paths: ProjectPaths, args: argparse.Namespace) -> CommandResult:
             target,
             captured["rollbackSpec"],
             captured["previousPointer"],
+            **execution_arguments,
         )
     except (Exception, KeyboardInterrupt) as error:
         _mark_recovery_required(transaction, state["id"], error)
         raise
+    qualification_receipt = None
+    if qualification == "full":
+        for action_result in state.get("rolloutActionResults", []):
+            if action_result.get("kind") == RolloutActionKind.TARGET_FULL.value:
+                qualification_receipt = action_result.get("qualificationEvidence")
+                break
     return CommandResult(
         "upgrade",
         "ok",
-        "typed maintenance-window upgrade completed; quick smoke passed",
-        facts={**facts, "dryRun": False, "transaction": state},
+        (
+            "typed maintenance-window upgrade completed; full qualification passed"
+            if qualification == "full"
+            else "typed maintenance-window upgrade completed; quick smoke passed"
+        ),
+        facts={
+            **facts,
+            "dryRun": False,
+            "qualificationProduced": qualification == "full",
+            "qualificationEvidence": qualification_receipt,
+            "transaction": state,
+        },
     )
 
 

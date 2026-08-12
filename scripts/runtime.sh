@@ -157,21 +157,21 @@ cd "$ROOT_DIR"
 
 case "$ACTION" in
   start)
-    acquire_runtime_lock "$ROOT_DIR"
+    acquire_runtime_lock "$ROOT_DIR" start
     assert_approved_catalog_spec "$ROOT_DIR" true
     apply_profile "$PROFILE" false
     assert_approved_catalog_spec "$ROOT_DIR" true
     ;;
   profile)
-    acquire_runtime_lock "$ROOT_DIR"
+    acquire_runtime_lock "$ROOT_DIR" profile
     apply_profile "$PROFILE" true
     ;;
   stop)
-    acquire_runtime_lock "$ROOT_DIR"
+    acquire_runtime_lock "$ROOT_DIR" stop
     compose stop
     ;;
   restart)
-    acquire_runtime_lock "$ROOT_DIR"
+    acquire_runtime_lock "$ROOT_DIR" restart
     "$ROOT_DIR/scripts/model-manager.py" verify --cached
     compose restart qwen35
     wait_healthy

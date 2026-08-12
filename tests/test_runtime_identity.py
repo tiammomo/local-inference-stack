@@ -202,6 +202,72 @@ class MaterialInventoryTests(unittest.TestCase):
             with self.assertRaises(materials.MaterialError):
                 materials.sha256_file(source)
 
+    def test_private_json_reader_binds_parse_and_hash_to_the_same_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "logs" / "acceptance" / "evidence.json"
+            target.parent.mkdir(parents=True, mode=0o700)
+            body = b'{\n  "schemaVersion": 5, "status": "passed"\n}\n'
+            target.write_bytes(body)
+            target.chmod(0o600)
+            document, digest = materials.read_private_json_file(
+                target, root=root, maximum_bytes=1024
+            )
+            self.assertEqual(document, {"schemaVersion": 5, "status": "passed"})
+            self.assertEqual(digest, hashlib.sha256(body).hexdigest())
+
+    def test_private_json_reader_rejects_ancestor_symlink_escape(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as outside_directory,
+        ):
+            root = Path(directory)
+            outside = Path(outside_directory)
+            (outside / "acceptance").mkdir(mode=0o700)
+            target = outside / "acceptance" / "evidence.json"
+            target.write_text('{"outside":true}\n', encoding="utf-8")
+            target.chmod(0o600)
+            (root / "logs").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(materials.MaterialError):
+                materials.read_private_json_file(
+                    root / "logs" / "acceptance" / "evidence.json",
+                    root=root,
+                    maximum_bytes=1024,
+                )
+
+    def test_private_json_reader_rejects_parent_swap_during_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            acceptance = root / "logs" / "acceptance"
+            replacement = root / "replacement"
+            acceptance.mkdir(parents=True, mode=0o700)
+            replacement.mkdir(mode=0o700)
+            target = acceptance / "evidence.json"
+            target.write_text('{"identity":"first"}\n', encoding="utf-8")
+            target.chmod(0o600)
+            other = replacement / "evidence.json"
+            other.write_text('{"identity":"second"}\n', encoding="utf-8")
+            other.chmod(0o600)
+            real_open = materials._open_material
+            calls = 0
+
+            def swapping_open(path: Path):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    moved = root / "logs" / "acceptance-old"
+                    acceptance.rename(moved)
+                    replacement.rename(acceptance)
+                return real_open(path)
+
+            with (
+                patch.object(materials, "_open_material", side_effect=swapping_open),
+                self.assertRaisesRegex(materials.MaterialError, "path changed"),
+            ):
+                materials.read_private_json_file(
+                    target, root=root, maximum_bytes=1024
+                )
+
 
 class ArtifactIdentityTests(unittest.TestCase):
     def _artifact(self, root: Path) -> tuple[Path, Path, str]:

@@ -15,7 +15,7 @@ from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
@@ -36,6 +36,7 @@ from local_inference_stack.catalog import (
 )
 from local_inference_stack.deployment import CatalogDeploymentSpec
 from local_inference_stack.paths import ProjectPaths
+from local_inference_stack.result import RecoveryError
 from local_inference_stack.transactions import TransactionStore
 from local_inference_stack.host import environment_kind as classify_environment
 
@@ -739,6 +740,25 @@ class CatalogTests(unittest.TestCase):
         unknown_authority_field["models"][0]["deployAnyway"] = True
         with self.assertRaisesRegex(CatalogError, "unsupported or missing fields"):
             validate_catalog(unknown_authority_field)
+
+        missing_performance_policy = copy.deepcopy(self.catalog)
+        missing_performance_policy["models"][0].pop("performancePolicy")
+        with self.assertRaisesRegex(CatalogError, "unsupported or missing fields"):
+            validate_catalog(missing_performance_policy)
+
+        unsafe_performance_policy = copy.deepcopy(self.catalog)
+        unsafe_performance_policy["models"][0]["performancePolicy"][
+            "manifestPath"
+        ] = "../deployments/target/manifest.json"
+        with self.assertRaisesRegex(CatalogError, "invalid performance policy"):
+            validate_catalog(unsafe_performance_policy)
+
+        untyped_performance_policy = copy.deepcopy(self.catalog)
+        untyped_performance_policy["models"][0]["performancePolicy"][
+            "manifestSha256"
+        ] = "0" * 64
+        with self.assertRaisesRegex(CatalogError, "unsupported or missing fields"):
+            validate_catalog(untyped_performance_policy)
 
         oversized_number = copy.deepcopy(self.catalog)
         oversized_number["models"][0]["requirements"]["minVramGiB"] = 10**400
@@ -1521,6 +1541,15 @@ class CatalogTests(unittest.TestCase):
         self.assertFalse(plan["catalogDeploymentEligible"])
         self.assertFalse(plan["readyToDeploy"])
         self.assertIsNone(plan["actionPlan"])
+        self.assertEqual(
+            plan["hostAcceptancePolicy"]["supportedSchemaVersions"], [4, 5]
+        )
+        self.assertEqual(
+            plan["hostAcceptancePolicy"]["standaloneSchemaVersion"], 4
+        )
+        self.assertEqual(
+            plan["hostAcceptancePolicy"]["transactionBoundSchemaVersion"], 5
+        )
         self.assertTrue(plan["artifactPolicy"]["licenseReviewRequired"])
 
     def test_upstream_header_parser_normalizes_hugging_face_evidence(self) -> None:
@@ -1552,6 +1581,8 @@ class CatalogTests(unittest.TestCase):
             "profile": "latency",
             "startedAt": "2026-07-26T09:59:00+00:00",
             "finishedAt": "2026-07-26T10:00:00+00:00",
+            "gitCommit": "a" * 40,
+            "gitState": "clean",
             "catalogModelId": model["id"],
             "host": {
                 "platform": "linux",
@@ -1586,6 +1617,7 @@ class CatalogTests(unittest.TestCase):
             },
             "configuration": MODEL_MANAGER.acceptance_configuration(model),
             "freshnessPolicy": {"maxAgeDays": 30, "futureSkewSeconds": 300},
+            "privacy": "synthetic acceptance fixture",
         }
         evidence["validationInput"] = MODEL_MANAGER.validation_input(
             self.catalog, model, evidence["configuration"]
@@ -1754,6 +1786,74 @@ class CatalogTests(unittest.TestCase):
                 model, assessed, evidence, now=now
             )
         )
+
+    def test_schema_v5_qualification_requires_exact_completed_receipt(self) -> None:
+        transaction_id = "0dbdb868-b62f-4471-84b4-0198a0700f09"
+        ordinal = 6
+        binding = {
+            "policyId": "local-inference-stack/rollout-qualification-binding-v1",
+            "transactionId": transaction_id,
+            "operation": "upgrade",
+            "rolloutPlanSha256": "1" * 64,
+            "actionOrdinal": ordinal,
+            "actionKind": "target-full",
+            "rollbackSpecSha256": "2" * 64,
+            "sourceCatalogSpecSha256": "3" * 64,
+            "targetCatalogSpecSha256": "4" * 64,
+            "performancePolicySha256": "a" * 64,
+            "modelPortSourceIdentitySha256": "b" * 64,
+            "qualificationInputSha256": "c" * 64,
+        }
+        basename = f"qualification-{transaction_id}-{ordinal}"
+        evidence = {
+            "schemaVersion": 5,
+            "evidenceId": basename,
+            "selfSha256": "5" * 64,
+            "rolloutBinding": binding,
+            "frozenInputs": {"liveRuntimeIdentitySha256": "6" * 64},
+            "configuration": {"profile": "latency"},
+            "run": {
+                "stepResults": [{"status": "passed"}],
+                "manifest": {
+                    "sourcePath": f"logs/acceptance/{basename}.run.json",
+                    "sourceSha256": "7" * 64,
+                    "selfSha256": "8" * 64,
+                },
+            },
+        }
+        receipt = {
+            "evidenceSha256": "9" * 64,
+            "runManifestPath": f"logs/acceptance/{basename}.run.json",
+            "runManifestSha256": "7" * 64,
+            "runManifestSelfSha256": "8" * 64,
+            "stepResultsSha256": MODEL_MANAGER.sha256_document(
+                evidence["run"]["stepResults"]
+            ),
+            "configurationSha256": MODEL_MANAGER.sha256_document(
+                evidence["configuration"]
+            ),
+            "runtimeIdentitySha256": "6" * 64,
+            "rolloutBindingSha256": MODEL_MANAGER.sha256_document(binding),
+        }
+        store = MagicMock()
+        store.completed_upgrade_qualification.return_value = receipt
+        with (
+            patch.object(
+                MODEL_MANAGER,
+                "read_secure_evidence_with_sha256",
+                return_value=(evidence, "9" * 64),
+            ),
+            patch.object(MODEL_MANAGER, "TransactionStore", return_value=store),
+        ):
+            self.assertTrue(
+                MODEL_MANAGER.completed_rollout_qualification_matches(evidence)
+            )
+            store.completed_upgrade_qualification.side_effect = RecoveryError(
+                "transaction is not completed"
+            )
+            self.assertFalse(
+                MODEL_MANAGER.completed_rollout_qualification_matches(evidence)
+            )
 
 
 if __name__ == "__main__":

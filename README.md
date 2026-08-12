@@ -79,6 +79,24 @@ Git；事务内 `quick --no-record` 只作服务门禁，不构成 qualification
 provisional 条目，不能形成合法 validated rollback/LTS 模型对，因此真实 upgrade/rollback 按设计
 fail closed。操作和恢复细节见[升级与回滚](docs/UPGRADING.md)。
 
+upgrade 默认使用兼容的 `--qualification quick`。需要把完整验收纳入同一维护事务时，先只读
+检查，再显式批准：
+
+```bash
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full --yes
+```
+
+这条 v2 rollout 会在目标 quick 之后、rollback pointer 发布之前运行独立 `target-full` action；
+schema v5 evidence 与 run manifest 固定到 transaction、plan、action、source/target spec、运行进程、
+controller 和干净 ModelPort build。只有完成事务中匹配的收据才能让该证据具备 qualification 语义。
+当前性能策略仍是 `pending-baseline`，Catalog 也没有合法模型对，所以真实 full upgrade 仍应
+fail closed；当前 live ModelPort 还未在 `/livez` 暴露与受审 `config.toml` 精确一致的
+`build.configSha256`，因此跨仓升级前 full 预检也会在创建事务或停机前拒绝。本轮交付的是可测试
+的安全门，不是一次新的实机验证结论。
+
 完整的新机、已部署恢复和 WSL 自启流程见[首次部署](docs/GETTING_STARTED.md)与
 [运维与恢复](docs/OPERATIONS.md)。
 

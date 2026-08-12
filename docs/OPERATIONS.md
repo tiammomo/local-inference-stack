@@ -57,6 +57,11 @@ ledger，不能补造终结时间或伪造原始事务文档。
 ./stack upgrade --model CATALOG_ID
 ./stack upgrade --model CATALOG_ID --yes
 
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full
+MODELPORT_PROJECT_DIR=/absolute/path/to/ModelPort \
+  ./stack upgrade --model CATALOG_ID --qualification full --yes
+
 ./stack rollback
 ./stack rollback --yes
 ```
@@ -69,8 +74,10 @@ artifact、Compose、image 或 pointer 任一不匹配都会 fail closed。
 
 upgrade 成功后才发布一次性 active rollback pointer；rollback 通过后将它清为单调 tombstone，
 不能重复消费。两个流程内部的 `quick --no-record` 只是事务中的服务门禁：不会写 host acceptance，
-不等于 full qualification，也不会赋予 Catalog 晋级资格。需要 qualification 时必须走独立、受评审
-的 `full` 流程；其结果与 rollout transaction 的完整绑定仍是 Phase B 待办。
+不等于 full qualification，也不会赋予 Catalog 晋级资格。需要 qualification 时显式选择
+`--qualification full`；控制面会在 pointer 发布前运行 `target-full`，并要求 schema v5 evidence、
+schema v2 run manifest 和 completed transaction receipt 精确闭环。不能直接调用 runner 或注入
+rollout 环境变量；失败/恢复事务中遗留的 passed 文件也不具备资格。
 
 当前 Catalog 只有一个 provisional 条目，没有合法的 validated rollback/LTS 模型对；新安装也没有
 active pointer。因此真实 upgrade/rollback 会在准入或 pointer 检查处停止。不要手工伪造 Catalog、
@@ -123,8 +130,8 @@ supervisor 恢复 → 健康与 canonical 身份复核”的演练，并通过�
 回滚或主机 qualification，也不能替代一次真实的 WSL 关闭/重启验证。
 
 这仍不是完整 Phase B。类型化 `stack upgrade/rollback`、持久 immutable rollback spec、一次性
-pointer、逐 action 事务授权和 `quick --no-record` 服务门禁已经落地；尚缺把 `full` qualification
-记录完整绑定到同一 rollout transaction、在合法模型对上的 Tier-1 真实 upgrade→rollback drill，
+pointer、逐 action 事务授权、`quick --no-record` 服务门禁和 transaction-bound full receipt 已经
+落地；尚缺在合法模型对上的 Tier-1 真实 upgrade→rollback drill，
 以及真实 WSL reboot 后的事务/supervisor 恢复证据。在这些门槛关闭前禁止开始 Phase C，尤其不得
 据此删除旧 reader、candidate 或恢复路径。
 
